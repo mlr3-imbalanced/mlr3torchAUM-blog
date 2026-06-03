@@ -1,0 +1,17 @@
+# Private tooling -- never commit / share with the team
+/private/
+.env
+
+# Generated site output -- Netlify hosts it
+_site/
+.quarto/
+/.netlify/
+
+# R / system junk
+.Rproj.user/
+.Rhistory
+.RData
+.DS_Store
+
+/.quarto/
+**/*.quarto_ipynb

@@ -1,0 +1,23 @@
+project:
+  type: website
+  output-dir: _site
+  render:
+    - index.qmd
+    - about.qmd
+    - posts/
+
+website:
+  title: "mlr3torchAUM Blog"
+  description: "Notes on data analysis with R / Python"
+  navbar:
+    right:
+      - about.qmd
+      - icon: github
+        href: https://github.com/mlr3-imbalanced/mlr3torchAUM-blog
+
+format:
+  html:
+    theme: cosmo
+    css: styles.css
+
+lang: en
