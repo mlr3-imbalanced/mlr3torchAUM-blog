@@ -1,0 +1,12 @@
+---
+title: "Hello World"
+author: "mlr3-imbalanced"
+date: "2026-06-03"
+categories: [R]
+---
+
+Your first post -- a greeting printed with R:
+
+```{r}
+print("hello world")
+```
