@@ -1,11 +1,11 @@
 ---
 title: "Hello World"
-author: "mlr3-imbalanced"
+author: "Wei Cao"
 date: "2026-06-03"
 categories: [R]
 ---
 
-Your first post -- a greeting printed with R:
+My first post -- a greeting printed with R:
 
 ```{r}
 print("hello world")
