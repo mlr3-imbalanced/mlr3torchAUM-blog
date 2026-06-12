@@ -1,0 +1,176 @@
+---
+title: "Proportional versus Random Ordering: Statistical Analysis and Benchmarking"
+description: ""
+author: "Wei Cao"
+date: "2026-06-11"
+categories: []
+fig-width: 10
+fig-height: 4
+fig-dpi: 100
+---
+
+```{r}
+#| include: false
+options(width = 120)
+```
+
+The goal of this post is to do some statistical analysis to different ordering strategies
+described in Prof. Hocking's blog:
+[Creating large imbalanced data benchmarks](https://tdhock.github.io/blog/2025/imbalance-openml/label-order/), and verify our analysis by benchmarking with [atime](https://github.com/tdhock/atime).
+
+## Motivation
+
+When we do subsampling of a dataset, we always want to preserve the original class distribution.
+The most natural way is to do random sampling: we take a random sample then do the next without putting it back,
+believing the law of large numbers works. That is true, but we can do better.
+
+The aforementioned blog provides proportional ordering with R implementation (we will show later)
+and claims that "the proportional ordering is somewhat more stable than the random ordering".
+
+Why, and how much is it more stable?
+
+## Data Preparation
+
+ We download Parquet instead of ARFF files. Please refer to [this article](https://weicaocw.github.io/mlr3hf/entry_tasks/easy/live_report/easy_task_live_report.html#arff-vs.-parquet) for more details about the choice.
+
+```{r }
+library(data.table)
+library(DBI)
+library(atime)
+library(ggplot2)
+
+did <- 45570L  # OpenML Higgs (11,000,000 lines)
+pq_url <- sprintf(
+  "https://data.openml.org/datasets/%04d/%04d/dataset_%d.pq",
+  did %/% 10000L, did, did)
+
+cache_dir <- tools::R_user_dir("mlr3torchAUM-blog", "cache")
+dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+pq_local <- file.path(cache_dir, sprintf("dataset_%d.pq", did))
+
+if (!file.exists(pq_local)) {
+  message("download ~892 MB (only first time)...")
+  curl::multi_download(pq_url, pq_local, resume = TRUE)
+}
+sprintf("local parquet: %.0f MB", file.size(pq_local) / 1e6)
+```
+
+
+```{r}
+con <- dbConnect(duckdb::duckdb())
+label_dt <- setDT(dbGetQuery(
+  con, sprintf('SELECT "Target" FROM read_parquet(%s)', dbQuoteString(con, pq_local))))
+dbDisconnect(con, shutdown = TRUE)
+```
+
+```{r}
+y_all <- factor(as.character(label_dt$Target))
+counts <- label_dt[, .(count = .N), by = Target][order(-count)]
+cls0 <- as.character(counts$Target[1])
+p0 <- counts$count[1] / sum(counts$count)
+Npop <- length(y_all)
+counts[, prop := count/sum(count)][]
+```
+
+Two classes: approximately 53% vs. 47%.
+
+
+## Method / implementation
+
+### Reproduce Hocking's two orderings (proportional vs. random)
+```{r}
+make_orders <- function(y) {
+  n <- length(y)
+  rand_ord <- sample(n)
+  prop_ord <- data.table(y = y[rand_ord])[
+    , prop_y := seq(0, 1, l = .N), by = y][, order(prop_y)]
+  list(random = rand_ord, proportional = rand_ord[prop_ord])
+}
+
+set.seed(1)
+ord_list <- make_orders(y_all)
+rows <- list()
+for (ord_name in names(ord_list)) {
+  y_ord <- y_all[ord_list[[ord_name]]]
+  for (prop_data in c(0.01, 0.1, 1)) {
+    n <- as.integer(Npop * prop_data)
+    tab <- data.table(y = y_ord[1:n])[, .(prop_y = .N / n), by = y]
+    rows[[paste(ord_name, prop_data)]] <- data.table(ord_name, prop_data, tab)
+  }
+}
+dcast(rbindlist(rows), ord_name + prop_data ~ y, value.var = "prop_y")
+```
+
+ We reproduced the data table in Hocking's blog. Here Hocking claims that "the proportional ordering is somewhat more stable than the random ordering".
+
+
+### Statistical Analysis
+
+We view random sampling as a random sampling without replacement, and a single sample is a [Bernoulli](https://en.wikipedia.org/wiki/Bernoulli_distribution) random variable with a variance of $p(1-p)$. With the assumption of independence, the variance of the sample mean is $\frac{p(1-p)}{n}$, therefore the standard deviation is $\sqrt{\frac{p(1-p)}{n}}$.
+
+(TODO) The process is in fact a random sampling with replacement...
+
+As for the proportional ordering: $\frac{1}{n}$ is a constant.
+
+The result will be clear in a log-log plot.
+
+
+### Use atime to benchmark
+```{r}
+set.seed(1)
+prop_ord_full <- make_orders(y_all)$proportional
+is0_ord <- as.integer(y_all[prop_ord_full] == cls0)
+cum_p0 <- cumsum(is0_ord) / seq_along(is0_ord)
+
+timing <- atime::atime(
+  N=as.integer(10^seq(2, 7, by = 0.25)),
+  setup={y <- y_all[1:N] },
+  random={sample(length(y)) },
+  proportional={ ro <- sample(length(y)); data.table(y = y[ro])[, p := seq(0, 1, l = .N), by = y][, order(p)] },
+  seconds.limit=0.1, times=10)
+
+best <- atime::references_best(timing)
+plot(best) + ggplot2::ggtitle("Construction time of two orderings vs N (atime + references_best fit Big O)")
+```
+
+
+```{r}
+# Delay: median time at a specific N
+timing$measurements[N == max(N), .(expr.name, seconds = signif(median, 3))]
+
+# Throughput: N that can be processed within 0.1 seconds (log-log interpolation to solve T(N)=0.1)
+predict(best, seconds = 0.1)
+```
+
+```{r}
+## Let atime use RMSE as the measured unit. random use resampling to estimate RMSE;
+## proportional use the deterministic cum_p0 table (O(1)).
+rmse_unit <- atime::atime(
+  N = as.integer(10^seq(2, 6, by = 0.25)),
+  setup = {},
+  random       = { ph <- replicate(100, mean(sample(y_all, N) == cls0)); sqrt(mean((ph - p0)^2)) },
+  proportional = abs(cum_p0[N] - p0),
+  result = function(x) data.frame(rmse = x),
+  times = 5, seconds.limit = Inf)
+
+rmse_dt <- rmse_unit$measurements[rmse > 0]
+rmse_slopes <- rmse_dt[, .(slope = coef(lm(log10(rmse) ~ log10(N)))[2]), by = expr.name]
+print(rmse_slopes)  # should get random ≈ -0.5, proportional ≈ -1
+
+ggplot(rmse_dt, aes(N, rmse, color = expr.name)) +
+  geom_point(size = 2) + geom_line() +
+  scale_x_log10() + scale_y_log10() +
+  labs(title = "atime uses result= to measure not time, but statistical convergence rate",
+       y = "RMSE (custom unit, log)", x = "N (log)")
+```
+
+## Conclusions
+
+TODO
+
+
+## Session info
+
+```{r}
+sessionInfo()
+```
