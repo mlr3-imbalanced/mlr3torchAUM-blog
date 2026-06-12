@@ -77,15 +77,97 @@ Two classes: approximately 53% vs. 47%.
 
 ## Method / implementation
 
-### Reproduce Hocking's two orderings
+### Reproduce Hocking's two orderings (proportional vs. random)
 ```{r}
+make_orders <- function(y) {
+  n <- length(y)
+  rand_ord <- sample(n)
+  prop_ord <- data.table(y = y[rand_ord])[
+    , prop_y := seq(0, 1, l = .N), by = y][, order(prop_y)]
+  list(random = rand_ord, proportional = rand_ord[prop_ord])
+}
 
+set.seed(1)
+ord_list <- make_orders(y_all)
+rows <- list()
+for (ord_name in names(ord_list)) {
+  y_ord <- y_all[ord_list[[ord_name]]]
+  for (prop_data in c(0.01, 0.1, 1)) {
+    n <- as.integer(Npop * prop_data)
+    tab <- data.table(y = y_ord[1:n])[, .(prop_y = .N / n), by = y]
+    rows[[paste(ord_name, prop_data)]] <- data.table(ord_name, prop_data, tab)
+  }
+}
+dcast(rbindlist(rows), ord_name + prop_data ~ y, value.var = "prop_y")
+```
+
+ We reproduced the data table in Hocking's blog. Here Hocking claims that "the proportional ordering is somewhat more stable than the random ordering".
+
+
+### Statistical Analysis
+
+We view random sampling as a random sampling without replacement, and a single sample is a [Bernoulli](https://en.wikipedia.org/wiki/Bernoulli_distribution) random variable with a variance of $p(1-p)$. With the assumption of independence, the variance of the sample mean is $\frac{p(1-p)}{n}$, therefore the standard deviation is $\sqrt{\frac{p(1-p)}{n}}$.
+
+(TODO) The process is in fact a random sampling with replacement...
+
+As for the proportional ordering: $\frac{1}{n}$ is a constant.
+
+The result will be clear in a log-log plot.
+
+
+### Use atime to benchmark
+```{r}
+set.seed(1)
+prop_ord_full <- make_orders(y_all)$proportional
+is0_ord <- as.integer(y_all[prop_ord_full] == cls0)
+cum_p0 <- cumsum(is0_ord) / seq_along(is0_ord)
+
+timing <- atime::atime(
+  N=as.integer(10^seq(2, 7, by = 0.25)),
+  setup={y <- y_all[1:N] },
+  random={sample(length(y)) },
+  proportional={ ro <- sample(length(y)); data.table(y = y[ro])[, p := seq(0, 1, l = .N), by = y][, order(p)] },
+  seconds.limit=0.1, times=10)
+
+best <- atime::references_best(timing)
+plot(best) + ggplot2::ggtitle("Construction time of two orderings vs N (atime + references_best fit Big O)")
+```
+
+
+```{r}
+# Delay: median time at a specific N
+timing$measurements[N == max(N), .(expr.name, seconds = signif(median, 3))]
+
+# Throughput: N that can be processed within 0.1 seconds (log-log interpolation to solve T(N)=0.1)
+predict(best, seconds = 0.1)
+```
+
+```{r}
+## Let atime use RMSE as the measured unit. random use resampling to estimate RMSE;
+## proportional use the deterministic cum_p0 table (O(1)).
+rmse_unit <- atime::atime(
+  N = as.integer(10^seq(2, 6, by = 0.25)),
+  setup = {},
+  random       = { ph <- replicate(100, mean(sample(y_all, N) == cls0)); sqrt(mean((ph - p0)^2)) },
+  proportional = abs(cum_p0[N] - p0),
+  result = function(x) data.frame(rmse = x),
+  times = 5, seconds.limit = Inf)
+
+rmse_dt <- rmse_unit$measurements[rmse > 0]
+rmse_slopes <- rmse_dt[, .(slope = coef(lm(log10(rmse) ~ log10(N)))[2]), by = expr.name]
+print(rmse_slopes)  # should get random ≈ -0.5, proportional ≈ -1
+
+ggplot(rmse_dt, aes(N, rmse, color = expr.name)) +
+  geom_point(size = 2) + geom_line() +
+  scale_x_log10() + scale_y_log10() +
+  labs(title = "atime uses result= to measure not time, but statistical convergence rate",
+       y = "RMSE (custom unit, log)", x = "N (log)")
 ```
 
 ## Conclusions
 
-<!-- 用 bullet 列出本文展示了什么 / 学到了什么，
-     可指向后续工作或相关软件包。 -->
+TODO
+
 
 ## Session info
 
