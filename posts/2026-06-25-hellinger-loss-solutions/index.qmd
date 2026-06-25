@@ -1,0 +1,412 @@
+---
+title: "Stabilizing Hellinger Loss: Fused Gradients and Safe Square Roots"
+author: "Wei Cao"
+date: "2026-06-25"
+categories: [R, torch, numerical-stability]
+description: "Part 4 of a four-part series on numerical stability for softmax-based losses."
+execute:
+  echo: true
+  warning: true
+  error: true
+---
+
+This is the fourth and final post in the series. The previous post identified how Hellinger-style losses can fail because square-root derivatives interact badly with softmax probabilities at the extremes. The goal of this post is to collect the solution ideas motivated by the earlier analysis: custom autograd operators, safe square roots, epsilon-style protections, and the training-dynamics questions that remain after numerical stability is addressed.
+
+Previous in this series: [Hellinger Loss and the Square-Root Trap](../2026-06-25-hellinger-loss-stability/).
+
+## 3.3 Solutions
+
+There are several solutions.
+
+### 3.3.1 Custom Autograd Operator
+
+First, look at the simplest case: minimizing $-\sqrt{p_t}$.
+
+Return to our calculation.
+
+For the true class:
+
+$$
+-\frac{1}{2\sqrt{p_t}}p_t(1-p_t).
+$$
+
+For a non-true class:
+
+$$
+\frac{1}{2\sqrt{p_t}}p_tp_f.
+$$
+
+Please do not suppress the urge to simplify:
+
+$$
+-\frac{1}{2\sqrt{p_t}}p_t(1-p_t)
+\rightarrow
+-\frac{1}{2}(1-p_t)\sqrt{p_t}.
+$$
+
+No troublesome denominator.
+
+$$
+\frac{1}{2\sqrt{p_t}}p_tp_f
+\rightarrow
+\frac{1}{2}p_f\sqrt{p_t}.
+$$
+
+No troublesome denominator.
+
+Unified, this is:
+
+$$
+\frac{\partial l}{\partial z_i}
+= \frac{1}{2}(p_i-\delta_{ti})\sqrt{p_t}.
+$$
+
+But this introduces another problem: when $p_t=0$, the gradient is 0, and there is no training force.
+Training dynamics are a story for later posts in this series, as mentioned at the beginning of this post.
+
+Because **autograd does not automatically simplify for us** (the fourth time this is mentioned), we need to merge `sqrt` and softmax into one operator.
+Earlier, I mentioned that Cross Entropy merges `log` and softmax into one operator; it not only adds a computation rule in the low-level `derivatives.yaml`, but also writes C++ functions to handle it.
+
+Do we need to go that far?
+Maybe, if this loss function becomes public infrastructure in the future and is used by people on different software and hardware architectures.
+But for now, we have a way to modify the computation graph at the application layer; we only need to write R code.
+The framework designers left us a back door: torch's `autograd_function`.
+
+```{r}
+library(torch)
+?autograd_function
+```
+With it, we can customize our forward-propagation and backward-propagation rules.
+For forward propagation, there is nothing that needs to change.
+For backward propagation, we can reach in, cancel these terms, eliminate the denominator, and rescue it from autograd's rigid rules.
+
+The documentation is clear.
+Let us write it now.
+
+```{r}
+fused_hellinger_loss <- autograd_function(
+  forward = function(ctx, logits, targets) {
+    p <- nnf_softmax(logits, dim = -1) # use softmax on the final dimension to convert logits into probabilities
+
+    targets_2d <- targets$unsqueeze(2)
+    p_t <- p$gather(dim = 2, index = targets_2d)$squeeze(2)
+
+    loss <- (- torch_sqrt(p_t))$mean() # for multiple batches and samples, take the average
+
+    ctx$save_for_backward(p = p, p_t = p_t, targets = targets) # save intermediate results
+
+    return(loss)
+  },
+
+  backward = function(ctx, grad_output) {
+    # retrieve what we stored during the forward phase
+    saved <- ctx$saved_variable
+    p <- saved[[1]]  # the first saved object is p
+    p_t <- saved[[2]]  # the second saved object is p_t
+    targets <- saved[[3]]  # the third saved object is targets
+
+    batch_size <- p$shape[1]
+
+    sqrt_p_t <- torch_sqrt(p_t)$unsqueeze(2)  # shape: (batch, 1)
+
+    # 1/2 * (pi - delta_ti) * sqrt(pt)
+    grad_logits <- 0.5 * p * sqrt_p_t
+    grad_true_class <- torch_zeros_like(p)$scatter(
+      dim = 2,
+      index = targets$unsqueeze(2),
+      src = 0.5 * sqrt_p_t
+    )
+    grad_logits <- grad_logits - grad_true_class
+    grad_logits <- grad_logits * grad_output / batch_size
+
+    return(list(logits = grad_logits, targets = NULL))
+  }
+)
+```
+
+I want to explain this code a little more so that the details are clear.
+First, this code considers the multi-sample case.
+It assumes that the input `logits` has shape `(batch_num, class_num)`, and `targets` is a one-dimensional tensor with shape `(batch_num,)`.
+Of course, one could also choose to use `flatten()` to flatten it.
+
+`p <- nnf_softmax(logits, dim = -1)` means applying softmax on the final dimension, i.e. the class dimension.
+The shape does not change; it is still `(batch_num, class_num)`.
+
+`targets$unsqueeze(2)` adds one dimension to the one-dimensional tensor, turning it into `(batch_num, 1)`, so that it can work with the later `gather` function.
+`p$gather(dim = 2, index = targets_2d)` means: along the second dimension, i.e. the class dimension, pick out the indices in `target_2d`.
+This obtains the true-class $p_t$.
+Then `squeeze(2)` changes the shape back to `(batch_num,)`.
+
+`loss <- (- torch_sqrt(p_t))$mean()` averages the loss over the current batch.
+Of course, if we consider imbalance, we would not simply average; we would adjust according to the size of each class.
+Here I only show the simplest case.
+If we really run empirical tests, this needs to be combined with samplers, which is outside the scope of this post.
+
+Finally, `ctx$save_for_backward(p = p, p_t = p_t, targets = targets)` saves intermediate results for use during backward propagation.
+The forward pass returns the computed loss.
+
+The backward-propagation part is a bit harder to understand starting from `grad_logits`.
+First remember the identity obtained by algebraic transformation:
+
+$$
+\frac{1}{2}(p_i-\delta_{ti})\sqrt{p_t}.
+$$
+
+The line:
+
+```{r}
+grad_logits <- 0.5 * p * sqrt_p_t
+```
+
+is part of the final identity:
+
+$$
+\frac{1}{2}p_i\sqrt{p_t}.
+$$
+
+Here `p` has shape `(batch_num, class_num)`, while `sqrt_p_t` has shape `(batch_num, 1)` because of the previous `unsqueeze`.
+This triggers broadcasting of `sqrt_p_t`, so every $p_i$ is multiplied by $\sqrt{p_t}$.
+
+For non-true classes, this completes the calculation.
+But for the true class, where $i=t$, we are not done.
+Therefore, we create `grad_true_class`.
+For non-true classes it is 0; for the true class, we still need to subtract $\frac{1}{2}\sqrt{p_t}$.
+Finally, we divide by `batch_size` because we also averaged the loss.
+Do not forget `grad_output`, the upstream gradient, which must be multiplied in according to the chain rule.
+The final `grad_logits` still has shape `(batch_num, class_num)`.
+
+```{r}
+grad_true_class <- torch_zeros_like(p)$scatter(
+  dim = 2,
+  index = targets$unsqueeze(2),
+  src = 0.5 * sqrt_p_t
+)
+```
+
+How should we understand this key piece of code?
+
+`torch_zeros_like(p)` creates an all-zero matrix with shape `(batch_num, class_num)`, a canvas.
+The `scatter` operation with `dim = 2` tells the sniper rifle: fire along the column, i.e. class, dimension.
+`index = targets$unsqueeze(2)` says where the bullet should hit.
+`src = 0.5 * sqrt_p_t` says what powder is inside the bullet:
+put $(batch_num, 1)$-shaped $\frac{1}{2}\sqrt{p_t}$ into it.
+
+Written!
+
+It is worth noting that the final returned `grad_logits` still has shape `(batch_num, class_num)`.
+The gradient for every logit of every sample is preserved.
+
+```{r}
+logits <- torch_tensor(rbind(
+  c(1500.0, 0.0, 0.0), # confidently correct; true class is 1
+  c(0.0, 0.0, 1500.0)  # confidently wrong; true class is 2
+), requires_grad = TRUE)
+
+targets <- torch_tensor(c(1, 2), dtype = torch_long())
+
+loss <- fused_hellinger_loss(logits, targets)
+cat(sprintf("current Batch loss: %.4f\n", as.numeric(loss)))
+
+loss$backward()
+
+cat("\n--- Final returned logits gradient ---")
+logits$grad
+```
+What if we wrap it with the outer square root, $\sqrt{1-\sqrt{p_t}}$?
+
+For true-class logits, using some algebraic simplification tricks, namely multiplying numerator and denominator by $\sqrt{1-\sqrt{p_t}}$, then multiplying both by $1+\sqrt{p_t}$, gives the gradient:
+
+$$
+-\frac{1}{4}\sqrt{1-\sqrt{p_t}}(1+\sqrt{p_t})\sqrt{p_t}.
+$$
+
+No troublesome denominator.
+
+But for a non-true class:
+
+$$
+\frac{1}{4}
+\frac{\sqrt{1-\sqrt{p_t}}(1+\sqrt{p_t})}{1-p_t}
+\sqrt{p_t}p_f.
+$$
+
+The denominator cannot be eliminated.
+
+The non-true-class case is even funnier:
+the denominator is 0 when $1-p_t=0$, i.e. when $p_t$ approaches 1, meaning the model is approaching success.
+When it is 0, there is no gradient; when $p_f=0$, there will be `NaN`.
+
+This is a bit hard. I did not think of a solution immediately.
+But $1-p_t$ is exactly the sum of all $p_f$'s, isn't it?
+Maybe if the non-true classes can be added together, this denominator can be eliminated.
+Let us discuss this in the future.
+
+### 3.3.2 Protect the Square Root
+
+Since `sqrt` is the root of all evil, we need to protect it carefully.
+
+We will write our own `safe_sqrt`.
+The goals:
+
+1. Do not ruin forward propagation. If `safe_sqrt` computes $\sqrt{0}=1$, it breaks the forward pass, even though we will go through this step later.
+2. Make backward propagation safe: do not allow 0 to appear in the denominator.
+
+Now we are short-sighted people.
+We focus too much on preventing 0 from appearing in the denominator, and ignore whether forward propagation lives or dies.
+So when the troublemaker 0 appears, we say: no, you are not allowed to be 0; now you are 1.
+
+```{r}
+safe_sqrt_myopic <- function(x){
+    x_safe <- torch_where(x > 0, x, x + torch_ones_like(x))
+    return(torch_sqrt(x_safe))
+}
+
+zero <- torch_tensor(0, dtype = torch_float32(), requires_grad = TRUE)
+result <- safe_sqrt_myopic(zero)
+result$backward()
+cat("result (forward): ", as.numeric(result), "\n")
+cat("grad (back): ", as.numeric(zero$grad), "\n")
+```
+We bent the gradient from `Inf` into 0.5, because we forcibly shifted $x$ by a constant 1.
+Whether the shift is 1, 2, or any other number is a design degree of freedom.
+
+But the forward pass is broken.
+The next step is to fix the forward pass.
+It only breaks when $x=0$:
+
+```{r}
+safe_sqrt <- function(x){
+    x_safe <- torch_where(x > 0, x, x + torch_ones_like(x))
+    return(torch_sqrt(x_safe) * torch_where(x > 0,
+    torch_ones_like(x), torch_zeros_like(x)))
+}
+
+zero <- torch_tensor(0, dtype = torch_float32(), requires_grad = TRUE)
+result <- safe_sqrt(zero)
+result$backward()
+cat("result for 0 (forward): ", as.numeric(result), "\n")
+cat("grad for 0 (back): ", as.numeric(zero$grad), "\n")
+
+one <- torch_tensor(1, dtype = torch_float32(), requires_grad = TRUE)
+result <- safe_sqrt(one)
+result$backward()
+cat("result for 1 (forward): ", as.numeric(result), "\n")
+cat("grad for 1 (back): ", as.numeric(one$grad), "\n")
+```
+Fixed.
+
+The advantage of this method is that it is relatively general.
+It applies to:
+
+$$
+\sqrt{\sum(\text{one-hot}-\sqrt{p_k})^2},
+$$
+
+and also to:
+
+$$
+\sqrt{1-\sqrt{p_t}}
+$$
+
+and:
+
+$$
+1-\sqrt{p_t}.
+$$
+
+All of them can be handed to autograd without problems.
+The concern is that this changes the training dynamics:
+where there should have been an infinite gradient at $x=0$, it now becomes an arbitrarily designed number.
+The dynamics change.
+But we can design it to shift by a very large number, so that when $x=0$, or when it underflows to 0, there is still plenty of force.
+
+### 3.3.3 Other Solutions
+
+I collectively call these epsilon schemes.
+These methods are all direct, and their ideas are simple.
+
+For example, `clamp`: since numerical instability appears when $p$ reaches an extreme value, we prevent it from reaching that extreme by restricting it to $(0+\varepsilon, 1-\varepsilon)$.
+
+Or more directly:
+
+$$
+\sqrt{\max(x,\varepsilon)}.
+$$
+
+Before entering $\sqrt{\cdot}$, lift any input smaller than $\varepsilon$ up to $\varepsilon$, so $\sqrt{\cdot}$ never sees a number smaller than $\varepsilon$.
+
+Another example: protect `sqrt` with epsilon:
+
+$$
+x = \sqrt{x+\varepsilon^2}.
+$$
+
+These methods are not discussed further here.
+They will be discussed in future posts during empirical tests on real datasets of various scales.
+
+## 4. Philosophical Reflection and Preview of the Next Episode
+
+Minimizing $1-\sqrt{p_t}$ and minimizing $-\log(p_t)$ are both maximizing $p_t$, aren't they?
+Are they not the same thing?
+And even more directly, what about making the loss function $-p_t$?
+
+The answer is training dynamics:
+how to train more effectively and reach our goal faster.
+
+For example, after gradient analysis, $-\sqrt{p_t}$ has a vanishing gradient at 0.
+When $p_t=0$, $-\log(p_t)$ has strong gradient force.
+
+Some people have proposed q-loss, also called generalized cross entropy:
+
+$$
+\frac{1-p_t^q}{q},
+$$
+
+where $q$ is between 0 and 1.
+
+Reference:
+
+```bibtex
+@misc{zhang2018generalizedcrossentropyloss,
+      title={Generalized Cross Entropy Loss for Training Deep Neural Networks with Noisy Labels},
+      author={Zhilu Zhang and Mert R. Sabuncu},
+      year={2018},
+      eprint={1805.07836},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/1805.07836},
+}
+```
+
+Using L'Hopital's rule to take the gradient, when $q \rightarrow 0$, the gradient of:
+
+$$
+\frac{1-p_t^q}{q}
+$$
+
+is:
+
+$$
+-p_t^{-1}.
+$$
+
+Isn't this exactly the familiar gradient of Cross Entropy?
+So the paper says that when $q$ approaches 0, it becomes CE, more rigorously called Categorical Cross Entropy (CCE).
+
+What is $q=1/2$?
+Doesn't it look like the simplified Hellinger Distance?
+
+Whether it is a numerical-stability problem or a training-dynamics problem, in the end, we still need many experiments to validate our various schemes and ideas.
+Stay tuned for the next post in this series.
+
+## Conclusions
+
+- A custom autograd operator can fuse the relevant operations and use the algebraically simplified gradient, avoiding the denominator that causes `Inf * 0 -> NaN`.
+- A protected square root or epsilon-style scheme can make the computation safer, but it also changes the training dynamics.
+- The next step after this numerical-stability analysis is empirical testing across datasets and scales, followed by a closer study of training dynamics.
+
+## Future Posts
+
+For the numerical-stability solutions proposed in this series, future posts will run empirical analyses on multiple datasets and at multiple scales. It is possible that more elegant new solutions will be born in that process.
+
+Following the final question raised at the end of this series, future posts will also explore the training dynamics of loss functions. That analysis will also be combined with empirical results. Stay tuned.

@@ -1,0 +1,358 @@
+---
+title: "Hellinger Loss and the Square-Root Trap"
+author: "Wei Cao"
+date: "2026-06-25"
+categories: [R, torch, numerical-stability]
+description: "Part 3 of a four-part series on numerical stability for softmax-based losses."
+execute:
+  echo: true
+  warning: true
+  error: true
+---
+
+This is the third post in the series. The previous post showed how naive Cross Entropy fails because autograd composes separate operators without doing our algebraic cancellations. The goal of this post is to apply the same idea to Hellinger-distance losses, where the dangerous operator is `sqrt`: we will see how the original Hellinger formula, its simplified form, and the related `-sqrt(pt)` objective can all encounter `Inf * 0 -> NaN`. The next post collects solution patterns.
+
+Previous in this series: [Why Naive Softmax Cross Entropy Produces NaN Gradients](../2026-06-25-cross-entropy-softmax-stability/).
+
+## 3. The Truth About Hellinger
+
+Now, after reading a certain paper, we learn that it uses a metric based on Hellinger Distance as a multiclass evaluation metric.
+We want to build a new loss function based on Hellinger Distance.
+We also face numerical-stability issues.
+
+The formula for Hellinger Distance is:
+
+$$
+\frac{\sqrt{\sum_{i=1}^{K}(\delta_{ti}-\sqrt{p_i})^2}}{\sqrt{2}}.
+$$
+
+$K$ is still the total number of classes. $i$ is only a nominal subscript; later we will also use $k$, and so on.
+The subscript $t$ still represents the true class.
+$\delta_{ti}$ is still the Kronecker delta: it equals 1 when $i=t$, and 0 when $i\neq t$.
+
+That is:
+
+$$
+\frac{\lVert \text{one-hot-vector}-\sqrt{p}\rVert_2}{\sqrt{2}},
+$$
+
+where $p$ is the softmax vector.
+
+If we simplify it algebraically:
+
+$$
+\frac{\sqrt{\sum_i^K(\delta_{ti}-\sqrt{p_i})^2}}{\sqrt{2}}
+= \frac{\sqrt{(1-\sqrt{p_t})^2+\sum_{i\neq t}(\sqrt{p_i})^2}}{\sqrt{2}}.
+$$
+
+Then:
+
+$$
+= \frac{\sqrt{1-2\sqrt{p_t}+p_t+\sum_{i\neq t}p_i}}{\sqrt{2}}.
+$$
+
+Since:
+
+$$
+p_t+\sum_{i\neq t}p_i=1,
+$$
+
+the expression becomes:
+
+$$
+\frac{\sqrt{2-2\sqrt{p_t}}}{\sqrt{2}}
+= \sqrt{1-\sqrt{p_t}}.
+$$
+
+Very concise.
+$p_t$ is the true-class softmax probability.
+
+### 3.1 The Problem With `sqrt`
+
+Whether we look at the unsimplified Hellinger Distance formula or the simplified Hellinger Distance formula, the moment we see them, we secretly feel something is wrong:
+
+bad news, we have fallen into a nest of square roots.
+Backward propagation is dangerous.
+
+As we saw earlier in PyTorch's backward rule for `sqrt`:
+
+```yaml
+self: grad / (2 * result.conj())
+```
+
+Once $x \rightarrow 0$, `result`, the forward output $\sqrt{x}$, also becomes 0, and the whole expression becomes `Inf`.
+If the upstream `grad` is 0 at this moment, recall the softmax Jacobian: this is entirely possible.
+This is the naked source of `NaN`.
+
+A simple example:
+
+```{r}
+library(torch)
+s <- torch_tensor(0, dtype = torch_float32(), requires_grad = TRUE)
+l <- torch_sqrt(s)
+l$backward()
+s$grad
+```
+Now look at the second program:
+
+```{r}
+s <- torch_tensor(0, dtype = torch_float32(), requires_grad = TRUE)
+l <- torch_sqrt(s*s)
+l$backward()
+s$grad
+```
+Let us briefly review why the second program becomes `NaN`.
+Let $y=g(f(x))$, where $f(x)=x^2$, and $g(y)=\sqrt{y}$.
+Then $f'(x)=2x$, and $g'(y)=1/(2\sqrt{y})$.
+By the chain rule, the gradient of `s` in the second program is:
+
+$$
+\frac{1}{2\sqrt{s^2}} \cdot 2s.
+$$
+
+Do you feel the urge to simplify and cancel terms?
+For the third time in this post, I emphasize: **autograd does not automatically differentiate algebraically!**
+
+If $s=0$, or if it is close enough to 0 in the eyes of float32 (recall the smallest positive subnormal number discussed at the beginning), then $1/(2\sqrt{s^2})$ is `Inf`, and $s$ is 0.
+`Inf * 0` becomes a gorgeous `NaN`.
+
+### 3.2 Re-examining Hellinger Distance
+
+#### 3.2.1 The Original Hellinger Distance Formula
+
+The original formula is a bit tedious to analyze, but it can be done.
+The original expression can blow up.
+The details are in the analysis below.
+Let us walk through the most tedious analysis once; after that, future analyses will not be scary.
+
+Look at:
+
+$$
+\sqrt{\sum(\text{one-hot}-\sqrt{p_k})^2}.
+$$
+
+What quantities exist under the square root?
+We call these the sources of gradient explosion.
+Let:
+
+$$
+S=\sum(\text{one-hot}-\sqrt{p_k})^2.
+$$
+
+This is under the outer square root.
+What else appears?
+$p_k$, including two cases: $p_t$, only one true-class probability, and $p_f$, multiple non-true-class probabilities, one fewer than the total number of classes.
+
+For the inner $p_k$, when do we encounter the problem?
+
+- $p_t \rightarrow 0$ for the true class: confidently wrong.
+- $p_f \rightarrow 0$ for false classes: confidently correct.
+
+For a non-true class:
+
+$$
+(0-\sqrt{p_f})^2=(\sqrt{p_f})^2.
+$$
+
+Its derivative:
+
+$$
+2\sqrt{p_f}\cdot \frac{1}{2\sqrt{p_f}}.
+$$
+
+When $p_f \rightarrow 0$, $\sqrt{p_f}$ approaches 0, and the derivative of $\sqrt{p_k}$ approaches infinity.
+The result is `NaN`.
+When $p_f \rightarrow 1$, the value is finite.
+
+For the true class:
+
+$$
+(1-\sqrt{p_t})^2.
+$$
+
+Its derivative:
+
+$$
+2(1-\sqrt{p_t})\left(-\frac{1}{2\sqrt{p_t}}\right).
+$$
+
+When $p_t \rightarrow 0$, the expression is $-\mathrm{Inf}$.
+When $p_t \rightarrow 1$, the expression is 0.
+
+For the outer $S$:
+when our prediction is close to perfect, meaning $(p_1,p_2,p_3)$ is close to the one-hot ground truth, $S \rightarrow 0$.
+Then $1/(2\sqrt{S})$ is `Inf`; otherwise it is finite.
+
+Putting it together:
+
+Confidently correct:
+$p_t \rightarrow 1$, other $p_f \rightarrow 0$, the outer layer is `Inf`, the inner non-true classes are already `NaN`, and the inner true-class expression is 0.
+`Inf * 0` is `NaN`.
+So whichever $p_k$ we look at, it is `NaN`.
+
+Confidently wrong:
+$p_t \rightarrow 0$, the outer layer is finite, the inner true class has $-\mathrm{Inf}$, and if a non-true-class $p_f \rightarrow 0$, the result is `NaN`; if the non-true-class probability is finite or 1, the result is finite.
+
+Verify this with code.
+
+Confidently correct:
+
+```{r}
+p <- torch_tensor(c(1, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
+oh_confidnet_correct <- torch_tensor(c(1, 0, 0), dtype = torch_float32())
+two <- torch_tensor(2, dtype = torch_float32())
+hd_confidnet_correct <- torch_sqrt(((oh_confidnet_correct - torch_sqrt(p))^2)$sum())/torch_sqrt(two)
+hd_confidnet_correct$backward()
+p$grad
+```
+Perfectly wiped out.
+What about when confidently wrong?
+
+```{r}
+p <- torch_tensor(c(1, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
+oh_confidnet_wrong <- torch_tensor(c(0, 1, 0), dtype = torch_float32()) # class 2 is the true class
+two <- torch_tensor(2, dtype = torch_float32())
+hd_confidnet_wrong <- torch_sqrt(((oh_confidnet_wrong - torch_sqrt(p))^2)$sum())/torch_sqrt(two)
+hd_confidnet_wrong$backward()
+p$grad
+```
+The outer layer is finite, so everything depends on the inner layer.
+Our analysis said that the inner true class has $-\mathrm{Inf}$, and indeed we saw `-Inf`.
+For a non-true class with $p_f \rightarrow 0$, the result is `NaN`, and indeed the third entry is `NaN`.
+A non-true class that is finite or equal to 1 has a finite value.
+
+These gradients are then propagated to the logits.
+Therefore, whether the model is confidently correct or confidently wrong, both situations produce `NaN`.
+
+#### 3.2.2 The Simplified Hellinger Distance Formula
+
+Now directly minimize:
+
+$$
+\sqrt{1-\sqrt{p_t}}.
+$$
+
+The derivative is:
+
+$$
+-\frac{1}{4\sqrt{p_t}\sqrt{1-\sqrt{p_t}}}.
+$$
+
+Thus when $p_t \rightarrow 0$ or $p_t \rightarrow 1$, $-\mathrm{Inf}$ appears.
+This formula only considers the true class, so the gradient with respect to $p_f$ is 0.
+
+Verify with code:
+
+```{r}
+p <- torch_tensor(c(1, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
+one <- torch_tensor(1, dtype = torch_float32())
+hd_confidnet_correct <- torch_sqrt(one-torch_sqrt(p[1])) # class 1 is the true class
+hd_confidnet_correct$backward()
+p$grad
+```
+```{r}
+p <- torch_tensor(c(1, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
+one <- torch_tensor(1, dtype = torch_float32())
+hd_confidnet_wrong <- torch_sqrt(one-torch_sqrt(p[2])) # class 2 is the true class
+hd_confidnet_wrong$backward()
+p$grad
+```
+Indeed, as expected.
+
+Now include the softmax Jacobian.
+
+For the true class, we need to multiply by $p_t(1-p_t)$. When $p_t \rightarrow 0$ or $p_t \rightarrow 1$, this term is 0.
+Together with the previous $-\mathrm{Inf}$, both confident correctness and confident wrongness produce `NaN`.
+
+For a non-true class, we need to multiply by $-p_tp_f$.
+If $p_t=0$ or $p_f=0$, `NaN` will appear.
+In other words, both confident correctness and confident wrongness produce `NaN`.
+So everything should be wiped out.
+Look at the following program.
+
+```{r}
+z <- torch_tensor(c(1000, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
+p <- nnf_softmax(z, dim=1)
+one <- torch_tensor(1, dtype = torch_float32())
+hd_confidnet_correct <- torch_sqrt(one-torch_sqrt(p[1])) # class 1 is the true class
+hd_confidnet_correct$backward()
+z$grad
+```
+```{r}
+z <- torch_tensor(c(1000, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
+p <- nnf_softmax(z, dim=1)
+one <- torch_tensor(1, dtype = torch_float32())
+hd_confidnet_wrong <- torch_sqrt(one-torch_sqrt(p[2])) # class 2 is the true class
+hd_confidnet_wrong$backward()
+z$grad
+```
+Correct.
+
+Of course, minimizing $\sqrt{1-\sqrt{p_t}}$ can be analyzed.
+But it is also simply minimizing $1-\sqrt{p_t}$, i.e. minimizing $-\sqrt{p_t}$, which makes our life easier.
+
+The derivative is:
+
+$$
+-\frac{1}{2\sqrt{p_t}}.
+$$
+
+$p_t$ still inevitably appears in the denominator.
+When $p_t \rightarrow 0$, i.e. when confidently wrong, it becomes $-\mathrm{Inf}$.
+
+Including the softmax Jacobian:
+
+For the true class:
+
+$$
+-\frac{1}{2\sqrt{p_t}}p_t(1-p_t).
+$$
+
+For a non-true class:
+
+$$
+\frac{1}{2\sqrt{p_t}}p_tp_f.
+$$
+
+If we hand this to autograd:
+
+For the true class, when $p_t \rightarrow 0$:
+$-\mathrm{Inf}\cdot 0 \rightarrow \mathrm{NaN}$.
+In the confidently correct case, it is finite.
+
+For a non-true class, when $p_t \rightarrow 0$, the same logic applies.
+In the confidently correct case, it is 0.
+
+In other words, we have reduced the numerically unstable situation to only the case where the model is confidently wrong about the true class.
+
+```{r}
+z <- torch_tensor(c(1000, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
+p <- nnf_softmax(z, dim=1)
+hd_confidnet_correct <- -torch_sqrt(p[1]) # class 1 is the true class
+p$retain_grad() # do not release p's grad
+hd_confidnet_correct$backward()
+cat("p's grad: ", as.numeric(p$grad), "\n")
+cat("z's grad: ", as.numeric(z$grad), "\n")
+```
+When confidently correct, there is no problem.
+The gradient of $z$ becoming 0 is understandable: after all, the prediction is already close to successful.
+
+```{r}
+z <- torch_tensor(c(1000, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
+p <- nnf_softmax(z, dim=1)
+hd_confidnet_correct <- -torch_sqrt(p[2]) # class 2 is the true class
+p$retain_grad() # do not release p's grad
+hd_confidnet_correct$backward()
+cat("p's grad: ", as.numeric(p$grad), "\n")
+cat("z's grad: ", as.numeric(z$grad), "\n")
+```
+This confirms our analysis:
+when confidently wrong, it becomes `NaN`.
+
+## Conclusions
+
+- The original Hellinger Distance formula contains square roots both inside and outside the sum, which creates several ways for backward propagation to encounter `Inf`, `NaN`, or both.
+- The simplified formula `sqrt(1 - sqrt(pt))` reduces the expression but still leaves unstable square-root derivatives at the extremes.
+- Minimizing `-sqrt(pt)` narrows the unstable case to confident wrong predictions, which motivates the solution patterns in the next post.
+
+Next in this series: [Stabilizing Hellinger Loss: Fused Gradients and Safe Square Roots](../2026-06-25-hellinger-loss-solutions/).

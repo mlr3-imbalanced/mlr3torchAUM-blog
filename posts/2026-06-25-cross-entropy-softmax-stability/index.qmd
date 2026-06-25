@@ -1,0 +1,648 @@
+---
+title: "Why Naive Softmax Cross Entropy Produces NaN Gradients"
+author: "Wei Cao"
+date: "2026-06-25"
+categories: [R, torch, numerical-stability]
+description: "Part 2 of a four-part series on numerical stability for softmax-based losses."
+execute:
+  echo: true
+  warning: true
+  error: true
+---
+
+This is the second post in the series. The previous post established the float32 overflow and underflow facts that explain why very small probabilities and very large exponentials need special care. The goal of this post is to use those facts to analyze Cross Entropy with softmax, show why the naive `softmax` plus `-log` implementation can produce `NaN` gradients, and explain why fused `log_softmax` avoids that failure mode. The next post applies the same stability lens to Hellinger-distance losses.
+
+Previous in this series: [Float32 Overflow and Underflow for Softmax Losses](../2026-06-25-softmax-hellinger/).
+
+## 2. The Truth About Cross Entropy and Softmax
+
+Now our setting is as follows: we face a multiclass-classification task with $K$ classes. The classifier outputs logits, and we use softmax to convert them into probabilities.
+If $K = 3$, then $(z_1, z_2, z_3) \rightarrow (p_1, p_2, p_3)$, where $p_1 + p_2 + p_3 = 1$.
+If class 1 is the true class, then the one-hot vector representing the ground truth is $(1, 0, 0)$.
+
+We call $p_1$ $p_t$, and temporarily refer to both $p_2$ and $p_3$ as $p_f$.
+We call $z_1$ $z_t$, and temporarily refer to both $z_2$ and $z_3$ as $z_f$.
+We use $p_k$ to refer collectively to $p_1, p_2, p_3$. You may also see other subscripts, such as $p_i$; they are only names and have no special meaning.
+Similarly, we use $z_k$ to refer collectively to $z_1, z_2, z_3$. You may also see other subscripts, such as $z_i$; they are only names and have no special meaning.
+
+### 2.1 Cross Entropy Formula
+
+It is simply $-\log(p_t)$.
+I will not discuss its statistical or information-theoretic interpretations here; for now, it is enough to know the formula.
+
+### 2.2 Prerequisites
+
+#### 2.2.1 The Softmax Formula
+
+$$
+p_k = \frac{\exp(z_k)}{\sum_{i=1}^{K}\exp(z_i)}.
+$$
+
+#### 2.2.2 The Jacobian of Softmax
+
+This is the partial derivative of the probability $p_k$, after softmax conversion, with respect to logit $z_i$. Each pair $(k, i)$ corresponds to one entry in the Jacobian matrix.
+
+$$
+J_{ki} = \frac{\partial p_k}{\partial z_i}.
+$$
+
+Again using the three-class task ($K=3$) as an example, the Jacobian is:
+
+$$
+\frac{\partial p_1}{\partial z_1}, \frac{\partial p_1}{\partial z_2}, \frac{\partial p_1}{\partial z_3};
+$$
+
+$$
+\frac{\partial p_2}{\partial z_1}, \frac{\partial p_2}{\partial z_2}, \frac{\partial p_2}{\partial z_3};
+$$
+
+$$
+\frac{\partial p_3}{\partial z_1}, \frac{\partial p_3}{\partial z_2}, \frac{\partial p_3}{\partial z_3}.
+$$
+
+Now that we have the softmax formula, we can compute this Jacobian.
+
+$$
+\frac{\partial p_k}{\partial z_i}
+= \frac{\exp(z_k)'\sum_{i=1}^{K}\exp(z_i) - \left(\sum_{i=1}^{K}\exp(z_i)\right)'\exp(z_k)}
+{\left(\sum_{i=1}^{K}\exp(z_i)\right)^2}.
+$$
+
+When $k=i$, $\exp(z_k)' = \exp(z_k)$, and $\sum_{i=1}^{K}\exp(z_i)' = \exp(z_k)$.
+Therefore:
+
+$$
+\frac{\partial p_k}{\partial z_i}
+= \frac{\exp(z_k)\sum_{i=1}^{K}\exp(z_i) - \exp(z_k)\exp(z_k)}
+{\left(\sum_{i=1}^{K}\exp(z_i)\right)^2}
+= p_k - p_k^2
+= p_k(1-p_k).
+$$
+
+When $k \neq i$, $\exp(z_k)' = 0$, and $\sum_{i=1}^{K}\exp(z_i)' = \exp(z_i)$.
+Therefore:
+
+$$
+\frac{\partial p_k}{\partial z_i}
+= \frac{0 \cdot \sum_{i=1}^{K}\exp(z_i) - \exp(z_i)\exp(z_k)}
+{\left(\sum_{i=1}^{K}\exp(z_i)\right)^2}
+= -p_k p_i.
+$$
+
+For a three-class task, the softmax Jacobian is:
+
+$$
+\begin{pmatrix}
+p_1(1-p_1) & -p_1p_2 & -p_1p_3 \\
+-p_2p_1 & p_2(1-p_2) & -p_2p_3 \\
+-p_3p_1 & -p_3p_2 & p_3(1-p_3)
+\end{pmatrix}.
+$$
+
+Now abstract it one level further with the Kronecker delta:
+
+$$
+\delta_{ij} =
+\begin{cases}
+1, & \text{if } i = j \\
+0, & \text{if } i \neq j
+\end{cases}
+$$
+
+Then:
+
+$$
+J_{ki} = p_k(\delta_{ki}-p_i).
+$$
+
+### 2.3 The Gradient of Cross Entropy
+
+We use $L$ to denote Cross Entropy, or any other loss function.
+By the chain rule:
+
+$$
+\frac{\partial L}{\partial z_i}
+= \sum_{k=1}^{K}
+\left(
+\frac{\partial L}{\partial p_k}
+\frac{\partial p_k}{\partial z_i}
+\right).
+$$
+
+Since the Cross Entropy formula $-\log(p_t)$ only depends on $p_t$:
+
+$$
+\frac{\partial L}{\partial z_i}
+= \frac{\partial L}{\partial p_t}
+\frac{\partial p_t}{\partial z_i}.
+$$
+
+$\frac{\partial L}{\partial p_t}$ is easy to compute: it is $-1/p_t$.
+$\frac{\partial p_t}{\partial z_i}$ can be read from the softmax Jacobian.
+
+$$
+\frac{\partial L}{\partial z_i}
+= -\frac{1}{p_t}J_{ti}
+= -\frac{1}{p_t}p_t(\delta_{ti}-p_i)
+= p_i-\delta_{ti}.
+$$
+
+For the true class, $t=i$:
+
+$$
+\frac{\partial L}{\partial z_t} = p_t - 1.
+$$
+
+For a non-true class, $t \neq i$:
+
+$$
+\frac{\partial L}{\partial z_f} = p_f.
+$$
+
+Besides the representation $p_i-\delta_{ti}$, which uses the Kronecker delta, a second representation is vector-based:
+the softmax gradient is
+
+$$
+p-y,
+$$
+
+where $y$ is the ground-truth one-hot vector.
+
+For example, in the three-class case where class 1 is true, the gradient is:
+
+$$
+(p_1,p_2,p_3)-(1,0,0)=(p_1-1,p_2,p_3).
+$$
+
+These are then passed as upstream gradients to each parameter of the classifier neural network.
+
+This is quite natural. For the true class, the gradient is $p_1-1$, always negative; the smaller $p_1$ is, the more negative it is, pulling $p_1$ upward until it approaches 1.
+For a non-true class, the gradient is always positive, pulling $p_f$ downward until it approaches 0.
+
+### 2.4 Computing Cross Entropy and Its Gradient Naively
+
+The naive way to compute Cross Entropy is to apply `-log` on top of the true-class softmax probability.
+
+$$
+\mathrm{CE}=-\log(p_t)
+=-\log\left(\frac{\exp(z_t)}{\sum_i \exp(z_i)}\right).
+$$
+
+This is the forward computation. It can actually be transformed with algebraic identities; I will introduce that later.
+
+For backward propagation, the gradient is what we introduced earlier:
+
+$$
+\frac{\partial L}{\partial z_i}
+= \frac{\partial L}{\partial p_t}
+\frac{\partial p_t}{\partial z_i}
+= -\frac{1}{p_t}p_t(\delta_{ti}-p_i).
+$$
+
+Why did I not simplify the expression above?
+
+**Because autograd does not simplify it for us!**
+
+When we compute Cross Entropy naively, the inner softmax is one operator, with its own forward and backward computation rules; the outer `-log` is another independent operator, with its own forward and backward computation rules.
+The outer and inner operators are mechanically connected by the chain rule. They do not need to know about each other's existence, like two upstream and downstream manufacturers in a global supply chain: they may be in different countries and do not interfere with each other's company operations.
+
+In the expression $1/p_t \cdot p_t \cdot (\delta_{ti}-p_i)$, $-1/p_t$ is the gradient of the outer merchant, `-log`; $p_t(\delta_{ti}-p_i)$ is the gradient of the inner merchant, softmax.
+They do not interfere with each other's company operations, so they do not cancel.
+
+### 2.5 A Numerical-Stability Checkup for Naive Cross Entropy
+
+After introducing so much about Cross Entropy and softmax, it may seem that we forgot why we studied those important facts about float32 and ran all those experiments earlier.
+It was because we need to study numerical stability.
+So let us start the analysis now.
+When analyzing it, we must not miss either forward propagation or backward propagation.
+
+As mentioned earlier, the naive way to compute Cross Entropy is to apply `-log` on top of the true-class softmax probability.
+Therefore, our analysis matrix is a two-by-two combination: softmax plus `-log`, forward plus backward, for four dimensions in total:
+
+1. Forward softmax.
+2. Forward `-log`.
+3. Backward softmax.
+4. Backward `-log`.
+
+#### 2.5.1 Forward Softmax
+
+Because softmax involves the exponential function, we always worry that a very large logit may produce overflow.
+Indeed, this is a very natural concern.
+
+```{r}
+library(torch)
+zmax <- torch_tensor(89, dtype = torch_float32())
+cat("torch exp(100): ", as.numeric(torch_exp(zmax)), "\n")
+```
+Empirically, for float32, when a logit reaches 89, applying the natural exponential turns it into `Inf`.
+But for softmax, we can do a simple algebraic identity transformation.
+
+$$
+p_k
+= \mathrm{softmax}(z_k)
+= \frac{\exp(z_k)}{\sum_{i=1}^{K}\exp(z_i)}
+= \frac{\exp(z_k)\exp(-z_{\max})}{\sum_{i=1}^{K}\exp(z_i)\exp(-z_{\max})}.
+$$
+
+That is, multiply both numerator and denominator by $\exp(-z_{\max})$.
+Then:
+
+$$
+p_k
+= \frac{\exp(z_k-z_{\max})}{\sum_{i=1}^{K}\exp(z_i-z_{\max})}.
+$$
+
+Therefore, the forward computation of softmax cannot overflow, as long as the logits themselves do not overflow.
+
+```{r}
+big <- torch_tensor(3.40e38, dtype=torch_float32(), requires_grad = TRUE)
+small <- torch_tensor(-3.40e38, dtype=torch_float32(), requires_grad = TRUE)
+zero <- torch_tensor(0, dtype = torch_float32(), requires_grad = TRUE)
+
+cat("big after subtracting the max logit: ", as.numeric(big - big), "\n")
+cat("small after subtracting the max logit: ", as.numeric(small - big), "\n")
+cat("zero after subtracting the max logit: ", as.numeric(zero - big), "\n")
+exp_big_subtracted <- torch_exp(big - big)
+exp_small_subtracted <- torch_exp(small - big)
+exp_zero_subtracted <- torch_exp(zero - big)
+sum_exp <- exp_big_subtracted + exp_small_subtracted + exp_zero_subtracted
+cat("big after subtracting the max logit and exponentiating: ", as.numeric(exp_big_subtracted), "\n")
+cat("small after subtracting the max logit and exponentiating: ", as.numeric(exp_small_subtracted), "\n")
+cat("zero after subtracting the max logit and exponentiating: ", as.numeric(exp_zero_subtracted), "\n")
+cat("denominator", as.numeric(sum_exp <- exp_big_subtracted + exp_small_subtracted + exp_zero_subtracted), "\n")
+
+p_big <- exp_big_subtracted/sum_exp
+p_small <- exp_small_subtracted/sum_exp
+p_zero <- exp_zero_subtracted/sum_exp
+cat("p_big: ", as.numeric(p_big), "\n")
+cat("p_small: ", as.numeric(p_small), "\n")
+cat("p_zero: ", as.numeric(p_zero), "\n")
+```
+We can see that no overflow occurred.
+The denominator of softmax is at least 1, so forward softmax computation is very safe.
+
+Although no overflow occurred, underflow did occur: after subtracting this `big`, other logits may become extremely small and directly underflow to negative infinity.
+They may not even need to be that small; after exponentiation, they may underflow to 0.
+This plants a hidden danger for the backward propagation of `log`.
+
+#### 2.5.2 Backward Softmax
+
+To compute backward softmax, we only need to substitute into the softmax Jacobian:
+
+$$
+J_{ki}=p_k(\delta_{ki}-p_i).
+$$
+
+Here we assume class 2 is the true class: confidently wrong.
+Because Cross Entropy only uses the true-class $p_t$, we only examine this $p_t$, which is `p_small`.
+
+$$
+J_{21}=-p_2p_1=-0\cdot 1=0,
+$$
+
+$$
+J_{22}=p_2(1-p_2)=0\cdot(1-0)=0,
+$$
+
+$$
+J_{23}=-p_2p_3=-0\cdot 0=0.
+$$
+
+```{r}
+p_small$backward()
+cat("gradient passed from p_small, the true-class pt, to the big logit: ", as.numeric(big$grad), "\n")
+cat("gradient passed from p_small, the true-class pt, to the small logit: ", as.numeric(small$grad), "\n")
+cat("gradient passed from p_small, the true-class pt, to the zero logit: ", as.numeric(zero$grad), "\n")
+```
+#### 2.5.3 Forward `-log`
+
+The risk of non-finite values in the forward computation of `log` comes from 0 and negative numbers.
+However, $p_k$ cannot be negative; underflowing to 0 is very possible.
+Since Cross Entropy only takes the true-class softmax probability $p_t$, i.e. $-\log(p_t)$, when does it become 0?
+When the model is confidently wrong.
+
+```{r}
+pt_conf_wrong <- torch_tensor(0, dtype = torch_float32())
+ce <- -log(pt_conf_wrong)
+cat("Cross Entropy when confidently wrong: ", as.numeric(ce), "\n")
+```
+This is not actually that harmful; it is expected.
+But what happens to backward propagation in this situation?
+
+#### 2.5.4 Backward `-log`
+
+We know that the derivative of $\log(x)$ is $1/x$.
+With the negative sign in Cross Entropy, it becomes $-1/p_t$.
+
+By the chain rule:
+
+For the gradient passed from CE to $z_t$, the true-class logit:
+
+$$
+-\frac{1}{p_t}p_t(1-p_t).
+$$
+
+For the gradient passed from CE to $z_f$, a non-true-class logit:
+
+$$
+-\frac{1}{p_t}p_t(-p_f).
+$$
+
+Although we have a strong urge to simplify and cancel terms, we already said that because we are computing Cross Entropy naively, the `log` operator and the softmax operator are independent operators, and gradient computation is fully handed over to autograd.
+We emphasized earlier that **autograd does not automatically cancel terms**. It is hard to overemphasize this.
+
+This $p_t$ is the root cause of NaN in backward propagation.
+When $p_t$ approaches 0, meaning the model is confidently wrong, $-1/p_t$ becomes $-\mathrm{Inf}$. The later multiplier $p_t$ is also 0.
+An `Inf` multiplied by 0 naturally becomes `NaN`.
+
+```{r}
+z <- torch_tensor(c(-1000, 1000, 1000), dtype = torch_float32(), requires_grad = TRUE) # true class is 1; confidently wrong
+p <- nnf_softmax(z, dim=1)
+l <- - torch_log(p[1])
+l$backward()
+z$grad
+```
+The result confirms our analysis.
+The entire army is wiped out; none is spared.
+
+### 2.6 Solution: Invent a New Operator
+
+Now we can finally stop suppressing our urge to simplify.
+
+In fact, we already simplified it earlier in Section 2.3.
+The conclusion:
+the gradient passed from Cross Entropy to the logits is:
+
+$$
+p_i-\delta_{ti}.
+$$
+
+In vector form, it is $p-y$, where $y$ is the ground-truth one-hot vector.
+
+This is a very clean result, without any troublesome denominator.
+
+Therefore, we invent a combined `log + softmax` operator and directly use the simplified gradient formula for backward propagation.
+
+Although we have already analyzed it in detail, let us reorganize the reasoning with more standard notation.
+
+When computing the gradient of the softmax layer, we focus on the partial derivative of the loss function $L$ with respect to input $z_k$:
+
+$$
+\frac{\partial L}{\partial z_k}
+= \sum_{i=1}^{N}
+\frac{\partial L}{\partial y_i}
+\frac{\partial y_i}{\partial z_k}.
+$$
+
+Here:
+
+- $\mathrm{grad}_i$ represents $\frac{\partial L}{\partial y_i}$.
+- $\delta_{ik}$ is the Kronecker delta: 1 when $i=k$, otherwise 0.
+- $p_k$ is the softmax output probability.
+
+To understand the derivation below, we must pay attention to what $y$ refers to here.
+
+In the previous analysis, we split `-log` and softmax into two independent functions: softmax inside and `-log` outside. Together they form Cross Entropy.
+So our setting was always: $y$ is $-\log(x)$, and $x$ is the result of softmax.
+Thus our chain rule was always: derivative of the outer `-log` multiplied by the Jacobian of the inner softmax.
+
+But now $y$ has changed, because we combine `log` and softmax into one operator, `log_softmax`.
+So Cross Entropy is simply `-log_softmax`; $y$ is very simple: $-x$, where $x$ is the result of `log_softmax`.
+
+Since the gradient of Cross Entropy is $p_i-\delta_{ti}$, adding a negative sign gives the gradient of `log_softmax`:
+
+$$
+\delta_{ti}-p_i.
+$$
+
+$\frac{\partial L}{\partial y_i}$ is actually extremely simple: it is $-1$ for the true-class `log_softmax`, and 0 otherwise.
+But we will not expand that here.
+
+Now let us do some algebra.
+
+Expand the computation:
+
+$$
+\frac{\partial L}{\partial z_k}
+= \sum_{i=1}^{N}\mathrm{grad}_i(\delta_{ik}-p_k).
+$$
+
+Use distributivity to split the summation:
+
+$$
+\sum_i \mathrm{grad}_i(\delta_{ik}-p_k)
+= \sum_i(\mathrm{grad}_i\delta_{ik})
+- \sum_i(\mathrm{grad}_i p_k).
+$$
+
+Final simplified form:
+
+Since $\delta_{ik}$ is 0 when $i \neq k$, the summation $\sum_i(\mathrm{grad}_i\delta_{ik})$ leaves only the $i=k$ term, namely $\mathrm{grad}_k$.
+At the same time, pulling out the constant $p_k$ gives:
+
+$$
+\frac{\partial L}{\partial z_k}
+= \mathrm{grad}_k
+- p_k\sum_{i=1}^{N}\mathrm{grad}_i.
+$$
+
+This formula expresses the concise form of **softmax backward propagation**:
+the gradient of the current node equals its upstream gradient, minus an offset term produced by weighting and summing all gradients.
+
+Remember this formula. It will help us read the `log_softmax` source code.
+
+### 2.7 A Journey Through the `log_softmax` Source Code
+
+The exciting moment has finally arrived.
+How does autograd actually know how to compute these gradients during backward propagation?
+We memorize derivative formulas for each function and calculate them by hand.
+
+For autograd, we give it a cheat sheet:
+<https://github.com/pytorch/pytorch/blob/v2.2.2/tools/autograd/derivatives.yaml#L2089>
+
+```yaml
+- name: _log_softmax(Tensor self, int dim, bool half_to_float) -> Tensor
+  self: _log_softmax_backward_data(grad, result, dim, self.scalar_type())
+  result: self_t - logsumexp_jvp(self_p, self_t, {dim}, true)
+```
+
+Compare this with the life-and-death book for some other operators:
+
+```yaml
+- name: log(Tensor self) -> Tensor
+  self: grad.div(self.conj())
+```
+
+`grad` is the upstream gradient. According to the chain rule, it appears here as a multiplier.
+`self` is the input data, the $x$ in $\log(x)$.
+`conj()` exists for the complex-number case; we can ignore it for now.
+`div` is division.
+
+This matches the derivative formula for $\log(x)$, namely $1/x$.
+
+Compare it with `sqrt`, the protagonist of the next section:
+
+```yaml
+- name: sqrt(Tensor self) -> Tensor
+  self: grad / (2 * result.conj())
+  result: auto_element_wise
+```
+
+`result` is the forward output of this operator, i.e. $\sqrt{x}$ rather than $x$.
+This also matches the derivative formula for $\sqrt{x}$: $1/(2\sqrt{x})$.
+
+But here, the backward propagation of `log_softmax` is delegated to a function called `_log_softmax_backward_data`.
+
+Finding its true body takes some effort, because PyTorch needs to consider different architectures and instruction sets, among other engineering concerns.
+Following the clue `_log_softmax_backward_data`, we find this in:
+<https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/native_functions.yaml#L3733>
+
+```yaml
+- func: _log_softmax_backward_data.out(Tensor grad_output, Tensor output, int dim, ScalarType input_dtype, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  dispatch:
+    CPU: log_softmax_backward_cpu_out
+    CUDA: log_softmax_backward_cuda_out
+    MTIA: log_softmax_backward_mtia_out
+    MPS: log_softmax_backward_mps_out
+    XPU: log_softmax_backward_xpu_out
+```
+
+Using CPU as the example, we get `log_softmax_backward_cpu_out`.
+Where do we find it?
+In <https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/SoftMax.cpp#L386>,
+inside `TORCH_IMPL_FUNC(log_softmax_backward_cpu_out)`, we have:
+
+```cpp
+if (grad_.ndimension() > 0 && dim_ == grad_.ndimension() - 1) {
+  log_softmax_backward_lastdim_kernel(kCPU, grad_input, grad_, output_);
+} else {
+  log_softmax_backward_kernel(kCPU, grad_input, grad_, output_, dim_);
+}
+```
+
+Our softmax is on the final dimension of the tensor, so we enjoy some special acceleration design and take the `log_softmax_backward_lastdim_kernel` path.
+
+Then, in <https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/cpu/SoftMaxKernel.cpp#L1064>, we find:
+
+```cpp
+ALSO_REGISTER_AVX512_DISPATCH(
+    log_softmax_backward_lastdim_kernel,
+    &log_softmax_backward_lastdim_kernel_impl)
+```
+
+This registers it to the CPU AVX512 instruction set. In principle, there should also be a fallback DISPATCH registration, but I did not find it at the moment.
+These details do not affect our source-code reading.
+
+Like treasure hunters, we continue along this clue:
+<https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/cpu/SoftMaxKernel.cpp#L1013>
+
+```cpp
+void log_softmax_backward_lastdim_kernel_impl(
+    const Tensor& grad_input,
+    const Tensor& grad,
+    const Tensor& output) {
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::BFloat16, at::ScalarType::Half, grad.scalar_type(),
+      "log_softmax_backward_lastdim_kernel_impl", [&] {
+        vec_host_softmax_backward_lastdim<scalar_t, true>::apply(
+            grad_input, grad, output);
+      });
+}
+```
+
+This DISPATCH adapts Python's dynamic types to C++ static compilation and supports multiple floating-point precisions.
+Eventually it passes control to `vec_host_softmax_backward_lastdim`.
+`scalar_t` is the data type; in our case, for example, it is float32.
+The `true` argument exists because softmax and `log_softmax` use different branches of the same function, so `true` tells it that we are computing `log_softmax` rather than softmax.
+
+This function is at:
+<https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/cpu/SoftMaxKernel.cpp#L913>
+
+Finally, at:
+<https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/cpu/SoftMaxKernel.cpp#L162>
+
+after many twists and turns, we finally find the source implementation we wanted.
+
+```cpp
+if constexpr (log_softmax) {
+  auto sum = vec::reduce_all<scalar_t>(
+      [](Vec& x, Vec& y) { return x + y; }, grad_data, dim_size);
+  vec::map2(
+      [sum](Vec x, Vec y) { return x - ((y.exp()) * Vec(sum)); },
+      grad_input_data,
+      grad_data,
+      output_data,
+      dim_size);
+} else {
+  // Softmax
+}
+```
+
+The `else` branch is the softmax branch. We look at `log_softmax`.
+Here:
+
+- `grad_data` $=$ the upstream gradient $(\mathrm{d}L/\mathrm{d}\text{ output})$.
+- `output_data` $=$ the forward output: $\log p$ in the `log_softmax` branch, and $p$ in the softmax branch.
+- `grad_input_data` $=$ the result to be written in $(\mathrm{d}L/\mathrm{d}\text{ logits } z)$.
+- `dim_size` $=$ the number of classes $K$; `scalar_t` $=$ the element type, such as float or double.
+
+```cpp
+auto sum = vec::reduce_all<scalar_t>(
+    [](Vec& x, Vec& y) { return x + y; }, grad_data, dim_size);
+```
+
+This line first takes `grad_data`, the upstream gradient, and sums it:
+$\sum_i^K \mathrm{grad}_i$.
+
+Next:
+
+```cpp
+vec::map2(
+    [sum](Vec x, Vec y) { return x - ((y.exp()) * Vec(sum)); },
+    grad_input_data, // output
+    grad_data,       // x
+    output_data,     // y
+    dim_size);
+```
+
+`[sum]` captures the `sum` computed above, i.e. $\sum_i^K \mathrm{grad}_i$.
+`[sum](Vec x, Vec y) { return x - ((y.exp()) * Vec(sum)); }` is an anonymous function, meaning that this operation is applied elementwise to vectors $x$ and $y$.
+
+`grad_data` is the upstream gradient $\mathrm{grad}_i$, and it is the anonymous function's `Vec x`.
+`output_data` is $\log(p)$, which in the three-class case can be understood as the vector $(\log(p_1), \log(p_2), \log(p_3))$.
+`y.exp()` applies `exp` to $\log(p_i)$, turning it back into $p_i$.
+`Vec(sum)` broadcasts the upstream-computed sum into a vector and multiplies it elementwise by `y.exp()`, i.e. $p_i$.
+
+Putting it all together, each element of the computed gradient vector is:
+
+$$
+\mathrm{grad}_i - p_i \sum_i^K \mathrm{grad}_i.
+$$
+
+If you flip back to Section 2.6, "Solution: Invent a New Operator", this is word for word the same.
+
+### 2.8 Postscript
+
+Incidentally, in some textbooks we often see another algebraic identity for Cross Entropy:
+
+$$
+\mathrm{CE}
+=-\log(p_t)
+=-\log\left(\frac{\exp(z_t)}{\sum_i \exp(z_i)}\right)
+=-z_t+\mathrm{logsumexp}(z_i).
+$$
+
+If we take its derivative with respect to $z_k$, what do we get?
+$-z_t$ gives $-\delta_{tk}$.
+The derivative of $\mathrm{logsumexp}(z_i)$ with respect to $z_k$ is our old friend $\mathrm{softmax}(z_i)$, i.e. $p_i$.
+Together, this gives $p_i-\delta_{tk}$.
+Different paths, same destination.
+
+## Conclusions
+
+- Naive Cross Entropy, implemented as softmax followed by `-log`, exposes a backward-pass `-1 / pt` term that autograd does not algebraically cancel with the softmax Jacobian.
+- When the model is confidently wrong, `pt` can underflow to zero, leading to `Inf * 0 -> NaN` in the backward pass.
+- Fusing `log` and softmax lets the backward pass use the simplified gradient directly, which is exactly what the `log_softmax` source code implements.
+
+Next in this series: [Hellinger Loss and the Square-Root Trap](../2026-06-25-hellinger-loss-stability/).
