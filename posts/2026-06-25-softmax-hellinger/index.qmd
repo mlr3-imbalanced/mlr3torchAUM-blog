@@ -4,6 +4,10 @@ author: "Wei Cao"
 date: "2026-06-25"
 categories: [R, torch, numerical-stability]
 description: "Forward and backward numerical stability for softmax-based losses."
+execute:
+  echo: true
+  warning: true
+  error: true
 ---
 
 ## Goal
@@ -29,7 +33,7 @@ From its construction, we can answer the following questions. I omit the calcula
 4. What is the spacing between two neighboring float32 numbers near 1? \(2^{-23}\), approximately \(1.19 \times 10^{-7}\).
 5. What is the spacing between neighboring float32 numbers around any given number? \(2^{e-23}\). For example, near \(2^{23}\) (8,388,608), the spacing between neighboring numbers is 1.
 
-```r
+```{r}
 library(torch)
 big <- torch_tensor(3.40e38, dtype=torch_float32())
 bigger <- torch_tensor(3.41e38, dtype=torch_float32())
@@ -55,20 +59,6 @@ cat("number: ", as.numeric(number), "\n") # 8388608
 cat("number + delta 0.5: ", as.numeric(number_delta05), "\n") # 8388608
 cat("number + delta 1: ", as.numeric(number_delta1), "\n") # 8388609
 ```
-
-```text
-big enough:  3.4e+38
-bigger than big:  Inf
-small enough:  1.401298e-45
-smaller than small:  1.401298e-45
-really small:  0
-one + delta:  1
-one + delta plus:  1.000001
-number:  8388608
-number + delta 0.5:  8388608
-number + delta 1:  8388609
-```
-
 All of this is only to give the reader an intuition: at some point, float32 gives up on very large numbers or numbers that get infinitely close to 0, surrendering them as `Inf` or `0`.
 Also, the larger a number is, the less precise float32 becomes, and the spacing between neighboring float32 values becomes larger.
 
@@ -287,15 +277,10 @@ Therefore, our analysis matrix is a two-by-two combination: softmax plus `-log`,
 Because softmax involves the exponential function, we always worry that a very large logit may produce overflow.
 Indeed, this is a very natural concern.
 
-```r
+```{r}
 zmax <- torch_tensor(89, dtype = torch_float32())
 cat("torch exp(100): ", as.numeric(torch_exp(zmax)), "\n")
 ```
-
-```text
-torch exp(100):  Inf
-```
-
 Empirically, for float32, when a logit reaches 89, applying the natural exponential turns it into `Inf`.
 But for softmax, we can do a simple algebraic identity transformation.
 
@@ -316,7 +301,7 @@ $$
 
 Therefore, the forward computation of softmax cannot overflow, as long as the logits themselves do not overflow.
 
-```r
+```{r}
 big <- torch_tensor(3.40e38, dtype=torch_float32(), requires_grad = TRUE)
 small <- torch_tensor(-3.40e38, dtype=torch_float32(), requires_grad = TRUE)
 zero <- torch_tensor(0, dtype = torch_float32(), requires_grad = TRUE)
@@ -340,20 +325,6 @@ cat("p_big: ", as.numeric(p_big), "\n")
 cat("p_small: ", as.numeric(p_small), "\n")
 cat("p_zero: ", as.numeric(p_zero), "\n")
 ```
-
-```text
-big after subtracting the max logit:  0
-small after subtracting the max logit:  -Inf
-zero after subtracting the max logit:  -3.4e+38
-big after subtracting the max logit and exponentiating:  1
-small after subtracting the max logit and exponentiating:  0
-zero after subtracting the max logit and exponentiating:  0
-denominator 1
-p_big:  1
-p_small:  0
-p_zero:  0
-```
-
 We can see that no overflow occurred.
 The denominator of softmax is at least 1, so forward softmax computation is very safe.
 
@@ -384,19 +355,12 @@ $$
 J_{23}=-p_2p_3=-0\cdot 0=0.
 $$
 
-```r
+```{r}
 p_small$backward()
 cat("gradient passed from p_small, the true-class pt, to the big logit: ", as.numeric(big$grad), "\n")
 cat("gradient passed from p_small, the true-class pt, to the small logit: ", as.numeric(small$grad), "\n")
 cat("gradient passed from p_small, the true-class pt, to the zero logit: ", as.numeric(zero$grad), "\n")
 ```
-
-```text
-gradient passed from p_small, the true-class pt, to the big logit: 0
-gradient passed from p_small, the true-class pt, to the small logit: 0
-gradient passed from p_small, the true-class pt, to the zero logit: 0
-```
-
 #### 2.5.3 Forward `-log`
 
 The risk of non-finite values in the forward computation of `log` comes from 0 and negative numbers.
@@ -404,16 +368,11 @@ However, \(p_k\) cannot be negative; underflowing to 0 is very possible.
 Since Cross Entropy only takes the true-class softmax probability \(p_t\), i.e. \(-\log(p_t)\), when does it become 0?
 When the model is confidently wrong.
 
-```r
+```{r}
 pt_conf_wrong <- torch_tensor(0, dtype = torch_float32())
 ce <- -log(pt_conf_wrong)
 cat("Cross Entropy when confidently wrong: ", as.numeric(ce), "\n")
 ```
-
-```text
-Cross Entropy when confidently wrong:  Inf
-```
-
 This is not actually that harmful; it is expected.
 But what happens to backward propagation in this situation?
 
@@ -443,22 +402,13 @@ This \(p_t\) is the root cause of NaN in backward propagation.
 When \(p_t\) approaches 0, meaning the model is confidently wrong, \(-1/p_t\) becomes \(-\mathrm{Inf}\). The later multiplier \(p_t\) is also 0.
 An `Inf` multiplied by 0 naturally becomes `NaN`.
 
-```r
+```{r}
 z <- torch_tensor(c(-1000, 1000, 1000), dtype = torch_float32(), requires_grad = TRUE) # true class is 1; confidently wrong
 p <- nnf_softmax(z, dim=1)
 l <- - torch_log(p[1])
 l$backward()
 z$grad
 ```
-
-```text
-torch_tensor
-nan
-nan
-nan
-[ CPUFloatType{3} ]
-```
-
 The result confirms our analysis.
 The entire army is wiped out; none is spared.
 
@@ -808,34 +758,20 @@ This is the naked source of `NaN`.
 
 A simple example:
 
-```r
+```{r}
 s <- torch_tensor(0, dtype = torch_float32(), requires_grad = TRUE)
 l <- torch_sqrt(s)
 l$backward()
 s$grad
 ```
-
-```text
-torch_tensor
-inf
-[ CPUFloatType{1} ]
-```
-
 Now look at the second program:
 
-```r
+```{r}
 s <- torch_tensor(0, dtype = torch_float32(), requires_grad = TRUE)
 l <- torch_sqrt(s*s)
 l$backward()
 s$grad
 ```
-
-```text
-torch_tensor
-nan
-[ CPUFloatType{1} ]
-```
-
 Let us briefly review why the second program becomes `NaN`.
 Let \(y=g(f(x))\), where \(f(x)=x^2\), and \(g(y)=\sqrt{y}\).
 Then \(f'(x)=2x\), and \(g'(y)=1/(2\sqrt{y})\).
@@ -932,7 +868,7 @@ Verify this with code.
 
 Confidently correct:
 
-```r
+```{r}
 p <- torch_tensor(c(1, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
 oh_confidnet_correct <- torch_tensor(c(1, 0, 0), dtype = torch_float32())
 two <- torch_tensor(2, dtype = torch_float32())
@@ -940,19 +876,10 @@ hd_confidnet_correct <- torch_sqrt(((oh_confidnet_correct - torch_sqrt(p))^2)$su
 hd_confidnet_correct$backward()
 p$grad
 ```
-
-```text
-torch_tensor
-nan
-nan
-nan
-[ CPUFloatType{3} ]
-```
-
 Perfectly wiped out.
 What about when confidently wrong?
 
-```r
+```{r}
 p <- torch_tensor(c(1, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
 oh_confidnet_wrong <- torch_tensor(c(0, 1, 0), dtype = torch_float32()) # class 2 is the true class
 two <- torch_tensor(2, dtype = torch_float32())
@@ -960,15 +887,6 @@ hd_confidnet_wrong <- torch_sqrt(((oh_confidnet_wrong - torch_sqrt(p))^2)$sum())
 hd_confidnet_wrong$backward()
 p$grad
 ```
-
-```text
-torch_tensor
- 0.2500
-   -inf
-    nan
-[ CPUFloatType{3} ]
-```
-
 The outer layer is finite, so everything depends on the inner layer.
 Our analysis said that the inner true class has \(-\mathrm{Inf}\), and indeed we saw `-Inf`.
 For a non-true class with \(p_f \rightarrow 0\), the result is `NaN`, and indeed the third entry is `NaN`.
@@ -996,38 +914,20 @@ This formula only considers the true class, so the gradient with respect to \(p_
 
 Verify with code:
 
-```r
+```{r}
 p <- torch_tensor(c(1, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
 one <- torch_tensor(1, dtype = torch_float32())
 hd_confidnet_correct <- torch_sqrt(one-torch_sqrt(p[1])) # class 1 is the true class
 hd_confidnet_correct$backward()
 p$grad
 ```
-
-```text
-torch_tensor
--inf
- 0
- 0
-[ CPUFloatType{3} ]
-```
-
-```r
+```{r}
 p <- torch_tensor(c(1, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
 one <- torch_tensor(1, dtype = torch_float32())
 hd_confidnet_wrong <- torch_sqrt(one-torch_sqrt(p[2])) # class 2 is the true class
 hd_confidnet_wrong$backward()
 p$grad
 ```
-
-```text
-torch_tensor
- 0
--inf
- 0
-[ CPUFloatType{3} ]
-```
-
 Indeed, as expected.
 
 Now include the softmax Jacobian.
@@ -1041,7 +941,7 @@ In other words, both confident correctness and confident wrongness produce `NaN`
 So everything should be wiped out.
 Look at the following program.
 
-```r
+```{r}
 z <- torch_tensor(c(1000, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
 p <- nnf_softmax(z, dim=1)
 one <- torch_tensor(1, dtype = torch_float32())
@@ -1049,16 +949,7 @@ hd_confidnet_correct <- torch_sqrt(one-torch_sqrt(p[1])) # class 1 is the true c
 hd_confidnet_correct$backward()
 z$grad
 ```
-
-```text
-torch_tensor
-nan
-nan
-nan
-[ CPUFloatType{3} ]
-```
-
-```r
+```{r}
 z <- torch_tensor(c(1000, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
 p <- nnf_softmax(z, dim=1)
 one <- torch_tensor(1, dtype = torch_float32())
@@ -1066,15 +957,6 @@ hd_confidnet_wrong <- torch_sqrt(one-torch_sqrt(p[2])) # class 2 is the true cla
 hd_confidnet_wrong$backward()
 z$grad
 ```
-
-```text
-torch_tensor
-nan
-nan
-nan
-[ CPUFloatType{3} ]
-```
-
 Correct.
 
 Of course, minimizing \(\sqrt{1-\sqrt{p_t}}\) can be analyzed.
@@ -1114,7 +996,7 @@ In the confidently correct case, it is 0.
 
 In other words, we have reduced the numerically unstable situation to only the case where the model is confidently wrong about the true class.
 
-```r
+```{r}
 z <- torch_tensor(c(1000, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
 p <- nnf_softmax(z, dim=1)
 hd_confidnet_correct <- -torch_sqrt(p[1]) # class 1 is the true class
@@ -1123,16 +1005,10 @@ hd_confidnet_correct$backward()
 cat("p's grad: ", as.numeric(p$grad), "\n")
 cat("z's grad: ", as.numeric(z$grad), "\n")
 ```
-
-```text
-p's grad:  -0.5 0 0
-z's grad:  0 0 0
-```
-
 When confidently correct, there is no problem.
 The gradient of \(z\) becoming 0 is understandable: after all, the prediction is already close to successful.
 
-```r
+```{r}
 z <- torch_tensor(c(1000, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
 p <- nnf_softmax(z, dim=1)
 hd_confidnet_correct <- -torch_sqrt(p[2]) # class 2 is the true class
@@ -1141,12 +1017,6 @@ hd_confidnet_correct$backward()
 cat("p's grad: ", as.numeric(p$grad), "\n")
 cat("z's grad: ", as.numeric(z$grad), "\n")
 ```
-
-```text
-p's grad:  0 -Inf 0
-z's grad:  NaN NaN NaN
-```
-
 This confirms our analysis:
 when confidently wrong, it becomes `NaN`.
 
@@ -1208,23 +1078,9 @@ Maybe, if this loss function becomes public infrastructure in the future and is 
 But for now, we have a way to modify the computation graph at the application layer; we only need to write R code.
 The framework designers left us a back door: torch's `autograd_function`.
 
-```r
+```{r}
 ?autograd_function
 ```
-
-```text
-autograd_function            package:torch             R Documentation
-
-Records operation history and defines formulas for differentiating ops.
-
-Usage:
-autograd_function(forward, backward)
-
-Arguments:
-forward: Performs the operation...
-backward: Defines a formula for differentiating the operation...
-```
-
 With it, we can customize our forward-propagation and backward-propagation rules.
 For forward propagation, there is nothing that needs to change.
 For backward propagation, we can reach in, cancel these terms, eliminate the denominator, and rescue it from autograd's rigid rules.
@@ -1232,7 +1088,7 @@ For backward propagation, we can reach in, cancel these terms, eliminate the den
 The documentation is clear.
 Let us write it now.
 
-```r
+```{r}
 fused_hellinger_loss <- autograd_function(
   forward = function(ctx, logits, targets) {
     p <- nnf_softmax(logits, dim = -1) # use softmax on the final dimension to convert logits into probabilities
@@ -1303,7 +1159,7 @@ $$
 
 The line:
 
-```r
+```{r}
 grad_logits <- 0.5 * p * sqrt_p_t
 ```
 
@@ -1324,7 +1180,7 @@ Finally, we divide by `batch_size` because we also averaged the loss.
 Do not forget `grad_output`, the upstream gradient, which must be multiplied in according to the chain rule.
 The final `grad_logits` still has shape `(batch_num, class_num)`.
 
-```r
+```{r}
 grad_true_class <- torch_zeros_like(p)$scatter(
   dim = 2,
   index = targets$unsqueeze(2),
@@ -1345,7 +1201,7 @@ Written!
 It is worth noting that the final returned `grad_logits` still has shape `(batch_num, class_num)`.
 The gradient for every logit of every sample is preserved.
 
-```r
+```{r}
 logits <- torch_tensor(rbind(
   c(1500.0, 0.0, 0.0), # confidently correct; true class is 1
   c(0.0, 0.0, 1500.0)  # confidently wrong; true class is 2
@@ -1361,13 +1217,6 @@ loss$backward()
 cat("\n--- Final returned logits gradient ---")
 logits$grad
 ```
-
-```text
-current Batch loss: -0.5000
-Error: Expected a proper Tensor but got None (or an undefined Tensor in C++) for argument #0 'self'
-Error: Unknown error in lambda function.
-```
-
 What if we wrap it with the outer square root, \(\sqrt{1-\sqrt{p_t}}\)?
 
 For true-class logits, using some algebraic simplification tricks, namely multiplying numerator and denominator by \(\sqrt{1-\sqrt{p_t}}\), then multiplying both by \(1+\sqrt{p_t}\), gives the gradient:
@@ -1411,7 +1260,7 @@ Now we are short-sighted people.
 We focus too much on preventing 0 from appearing in the denominator, and ignore whether forward propagation lives or dies.
 So when the troublemaker 0 appears, we say: no, you are not allowed to be 0; now you are 1.
 
-```r
+```{r}
 safe_sqrt_myopic <- function(x){
     x_safe <- torch_where(x > 0, x, x + torch_ones_like(x))
     return(torch_sqrt(x_safe))
@@ -1423,12 +1272,6 @@ result$backward()
 cat("result (forward): ", as.numeric(result), "\n")
 cat("grad (back): ", as.numeric(zero$grad), "\n")
 ```
-
-```text
-result (forward):  1
-grad (back):  0.5
-```
-
 We bent the gradient from `Inf` into 0.5, because we forcibly shifted \(x\) by a constant 1.
 Whether the shift is 1, 2, or any other number is a design degree of freedom.
 
@@ -1436,7 +1279,7 @@ But the forward pass is broken.
 The next step is to fix the forward pass.
 It only breaks when \(x=0\):
 
-```r
+```{r}
 safe_sqrt <- function(x){
     x_safe <- torch_where(x > 0, x, x + torch_ones_like(x))
     return(torch_sqrt(x_safe) * torch_where(x > 0,
@@ -1455,14 +1298,6 @@ result$backward()
 cat("result for 1 (forward): ", as.numeric(result), "\n")
 cat("grad for 1 (back): ", as.numeric(one$grad), "\n")
 ```
-
-```text
-result for 0 (forward):  0
-grad for 0 (back):  0
-result for 1 (forward):  1
-grad for 1 (back):  0.5
-```
-
 Fixed.
 
 The advantage of this method is that it is relatively general.
