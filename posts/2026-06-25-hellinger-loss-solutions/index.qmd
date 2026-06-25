@@ -100,10 +100,10 @@ fused_hellinger_loss <- autograd_function(
 
   backward = function(ctx, grad_output) {
     # retrieve what we stored during the forward phase
-    saved <- ctx$saved_variable
-    p <- saved[[1]]  # the first saved object is p
-    p_t <- saved[[2]]  # the second saved object is p_t
-    targets <- saved[[3]]  # the third saved object is targets
+    saved <- ctx$saved_variables
+    p <- saved$p  # the object saved as p
+    p_t <- saved$p_t  # the object saved as p_t
+    targets <- saved$targets  # the object saved as targets
 
     batch_size <- p$shape[1]
 
