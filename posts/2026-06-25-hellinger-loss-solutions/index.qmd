@@ -1,5 +1,5 @@
 ---
-title: "Stabilizing Hellinger Loss: Fused Gradients and Safe Square Roots"
+title: "[4/4] Stabilizing Hellinger Loss: Fused Gradients and Safe Square Roots"
 author: "Wei Cao"
 date: "2026-06-25"
 categories: [R, torch, numerical-stability]

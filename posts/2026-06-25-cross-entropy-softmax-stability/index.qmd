@@ -1,5 +1,5 @@
 ---
-title: "Why Naive Softmax Cross Entropy Produces NaN Gradients"
+title: "[2/4] Why Naive Softmax Cross Entropy Produces NaN Gradients"
 author: "Wei Cao"
 date: "2026-06-25"
 categories: [R, torch, numerical-stability]

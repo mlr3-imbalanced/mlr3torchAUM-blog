@@ -1,5 +1,5 @@
 ---
-title: "Hellinger Loss and the Square-Root Trap"
+title: "[3/4] Hellinger Loss and the Square-Root Trap"
 author: "Wei Cao"
 date: "2026-06-25"
 categories: [R, torch, numerical-stability]

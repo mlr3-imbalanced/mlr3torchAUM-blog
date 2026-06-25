@@ -1,5 +1,5 @@
 ---
-title: "Float32 Overflow and Underflow for Softmax Losses"
+title: "[1/4] Float32 Overflow and Underflow for Softmax Losses"
 author: "Wei Cao"
 date: "2026-06-25"
 categories: [R, torch, numerical-stability]
