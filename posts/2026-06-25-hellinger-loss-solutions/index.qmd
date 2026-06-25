@@ -155,6 +155,7 @@ $$
 The line:
 
 ```{r}
+#| eval: false
 grad_logits <- 0.5 * p * sqrt_p_t
 ```
 
@@ -176,6 +177,7 @@ Do not forget `grad_output`, the upstream gradient, which must be multiplied in 
 The final `grad_logits` still has shape `(batch_num, class_num)`.
 
 ```{r}
+#| eval: false
 grad_true_class <- torch_zeros_like(p)$scatter(
   dim = 2,
   index = targets$unsqueeze(2),
