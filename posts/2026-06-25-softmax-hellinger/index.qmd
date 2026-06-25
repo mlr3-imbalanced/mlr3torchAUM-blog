@@ -27,11 +27,11 @@ Following the final question raised at the end of this post, future posts will a
 Float32 is the data type we commonly use for training machine-learning models, and it is also the default data type for torch tensors.
 From its construction, we can answer the following questions. I omit the calculation process here; if needed, I can write a separate post about it in the future.
 
-1. What is the largest representable number? \(2^{128} - 2^{104}\), approximately \(3.40 \times 10^{38}\). Slightly larger than this, and so on below.
-2. What is the smallest positive normal number? \(2^{-126}\), approximately \(1.17 \times 10^{-38}\).
-3. What is the smallest positive subnormal number? \(2^{-149}\), approximately \(1.40 \times 10^{-45}\).
-4. What is the spacing between two neighboring float32 numbers near 1? \(2^{-23}\), approximately \(1.19 \times 10^{-7}\).
-5. What is the spacing between neighboring float32 numbers around any given number? \(2^{e-23}\). For example, near \(2^{23}\) (8,388,608), the spacing between neighboring numbers is 1.
+1. What is the largest representable number? $2^{128} - 2^{104}$, approximately $3.40 \times 10^{38}$. Slightly larger than this, and so on below.
+2. What is the smallest positive normal number? $2^{-126}$, approximately $1.17 \times 10^{-38}$.
+3. What is the smallest positive subnormal number? $2^{-149}$, approximately $1.40 \times 10^{-45}$.
+4. What is the spacing between two neighboring float32 numbers near 1? $2^{-23}$, approximately $1.19 \times 10^{-7}$.
+5. What is the spacing between neighboring float32 numbers around any given number? $2^{e-23}$. For example, near $2^{23}$ (8,388,608), the spacing between neighboring numbers is 1.
 
 ```{r}
 library(torch)
@@ -64,18 +64,18 @@ Also, the larger a number is, the less precise float32 becomes, and the spacing 
 
 ## 2. The Truth About Cross Entropy and Softmax
 
-Now our setting is as follows: we face a multiclass-classification task with \(K\) classes. The classifier outputs logits, and we use softmax to convert them into probabilities.
-If \(K = 3\), then \((z_1, z_2, z_3) \rightarrow (p_1, p_2, p_3)\), where \(p_1 + p_2 + p_3 = 1\).
-If class 1 is the true class, then the one-hot vector representing the ground truth is \((1, 0, 0)\).
+Now our setting is as follows: we face a multiclass-classification task with $K$ classes. The classifier outputs logits, and we use softmax to convert them into probabilities.
+If $K = 3$, then $(z_1, z_2, z_3) \rightarrow (p_1, p_2, p_3)$, where $p_1 + p_2 + p_3 = 1$.
+If class 1 is the true class, then the one-hot vector representing the ground truth is $(1, 0, 0)$.
 
-We call \(p_1\) \(p_t\), and temporarily refer to both \(p_2\) and \(p_3\) as \(p_f\).
-We call \(z_1\) \(z_t\), and temporarily refer to both \(z_2\) and \(z_3\) as \(z_f\).
-We use \(p_k\) to refer collectively to \(p_1, p_2, p_3\). You may also see other subscripts, such as \(p_i\); they are only names and have no special meaning.
-Similarly, we use \(z_k\) to refer collectively to \(z_1, z_2, z_3\). You may also see other subscripts, such as \(z_i\); they are only names and have no special meaning.
+We call $p_1$ $p_t$, and temporarily refer to both $p_2$ and $p_3$ as $p_f$.
+We call $z_1$ $z_t$, and temporarily refer to both $z_2$ and $z_3$ as $z_f$.
+We use $p_k$ to refer collectively to $p_1, p_2, p_3$. You may also see other subscripts, such as $p_i$; they are only names and have no special meaning.
+Similarly, we use $z_k$ to refer collectively to $z_1, z_2, z_3$. You may also see other subscripts, such as $z_i$; they are only names and have no special meaning.
 
 ### 2.1 Cross Entropy Formula
 
-It is simply \(-\log(p_t)\).
+It is simply $-\log(p_t)$.
 I will not discuss its statistical or information-theoretic interpretations here; for now, it is enough to know the formula.
 
 ### 2.2 Prerequisites
@@ -88,13 +88,13 @@ $$
 
 #### 2.2.2 The Jacobian of Softmax
 
-This is the partial derivative of the probability \(p_k\), after softmax conversion, with respect to logit \(z_i\). Each pair \((k, i)\) corresponds to one entry in the Jacobian matrix.
+This is the partial derivative of the probability $p_k$, after softmax conversion, with respect to logit $z_i$. Each pair $(k, i)$ corresponds to one entry in the Jacobian matrix.
 
 $$
 J_{ki} = \frac{\partial p_k}{\partial z_i}.
 $$
 
-Again using the three-class task (\(K=3\)) as an example, the Jacobian is:
+Again using the three-class task ($K=3$) as an example, the Jacobian is:
 
 $$
 \frac{\partial p_1}{\partial z_1}, \frac{\partial p_1}{\partial z_2}, \frac{\partial p_1}{\partial z_3};
@@ -116,7 +116,7 @@ $$
 {\left(\sum_{i=1}^{K}\exp(z_i)\right)^2}.
 $$
 
-When \(k=i\), \(\exp(z_k)' = \exp(z_k)\), and \(\sum_{i=1}^{K}\exp(z_i)' = \exp(z_k)\).
+When $k=i$, $\exp(z_k)' = \exp(z_k)$, and $\sum_{i=1}^{K}\exp(z_i)' = \exp(z_k)$.
 Therefore:
 
 $$
@@ -127,7 +127,7 @@ $$
 = p_k(1-p_k).
 $$
 
-When \(k \neq i\), \(\exp(z_k)' = 0\), and \(\sum_{i=1}^{K}\exp(z_i)' = \exp(z_i)\).
+When $k \neq i$, $\exp(z_k)' = 0$, and $\sum_{i=1}^{K}\exp(z_i)' = \exp(z_i)$.
 Therefore:
 
 $$
@@ -165,7 +165,7 @@ $$
 
 ### 2.3 The Gradient of Cross Entropy
 
-We use \(L\) to denote Cross Entropy, or any other loss function.
+We use $L$ to denote Cross Entropy, or any other loss function.
 By the chain rule:
 
 $$
@@ -177,7 +177,7 @@ $$
 \right).
 $$
 
-Since the Cross Entropy formula \(-\log(p_t)\) only depends on \(p_t\):
+Since the Cross Entropy formula $-\log(p_t)$ only depends on $p_t$:
 
 $$
 \frac{\partial L}{\partial z_i}
@@ -185,8 +185,8 @@ $$
 \frac{\partial p_t}{\partial z_i}.
 $$
 
-\(\frac{\partial L}{\partial p_t}\) is easy to compute: it is \(-1/p_t\).
-\(\frac{\partial p_t}{\partial z_i}\) can be read from the softmax Jacobian.
+$\frac{\partial L}{\partial p_t}$ is easy to compute: it is $-1/p_t$.
+$\frac{\partial p_t}{\partial z_i}$ can be read from the softmax Jacobian.
 
 $$
 \frac{\partial L}{\partial z_i}
@@ -195,26 +195,26 @@ $$
 = p_i-\delta_{ti}.
 $$
 
-For the true class, \(t=i\):
+For the true class, $t=i$:
 
 $$
 \frac{\partial L}{\partial z_t} = p_t - 1.
 $$
 
-For a non-true class, \(t \neq i\):
+For a non-true class, $t \neq i$:
 
 $$
 \frac{\partial L}{\partial z_f} = p_f.
 $$
 
-Besides the representation \(p_i-\delta_{ti}\), which uses the Kronecker delta, a second representation is vector-based:
+Besides the representation $p_i-\delta_{ti}$, which uses the Kronecker delta, a second representation is vector-based:
 the softmax gradient is
 
 $$
 p-y,
 $$
 
-where \(y\) is the ground-truth one-hot vector.
+where $y$ is the ground-truth one-hot vector.
 
 For example, in the three-class case where class 1 is true, the gradient is:
 
@@ -224,8 +224,8 @@ $$
 
 These are then passed as upstream gradients to each parameter of the classifier neural network.
 
-This is quite natural. For the true class, the gradient is \(p_1-1\), always negative; the smaller \(p_1\) is, the more negative it is, pulling \(p_1\) upward until it approaches 1.
-For a non-true class, the gradient is always positive, pulling \(p_f\) downward until it approaches 0.
+This is quite natural. For the true class, the gradient is $p_1-1$, always negative; the smaller $p_1$ is, the more negative it is, pulling $p_1$ upward until it approaches 1.
+For a non-true class, the gradient is always positive, pulling $p_f$ downward until it approaches 0.
 
 ### 2.4 Computing Cross Entropy and Its Gradient Naively
 
@@ -254,7 +254,7 @@ Why did I not simplify the expression above?
 When we compute Cross Entropy naively, the inner softmax is one operator, with its own forward and backward computation rules; the outer `-log` is another independent operator, with its own forward and backward computation rules.
 The outer and inner operators are mechanically connected by the chain rule. They do not need to know about each other's existence, like two upstream and downstream manufacturers in a global supply chain: they may be in different countries and do not interfere with each other's company operations.
 
-In the expression \(1/p_t \cdot p_t \cdot (\delta_{ti}-p_i)\), \(-1/p_t\) is the gradient of the outer merchant, `-log`; \(p_t(\delta_{ti}-p_i)\) is the gradient of the inner merchant, softmax.
+In the expression $1/p_t \cdot p_t \cdot (\delta_{ti}-p_i)$, $-1/p_t$ is the gradient of the outer merchant, `-log`; $p_t(\delta_{ti}-p_i)$ is the gradient of the inner merchant, softmax.
 They do not interfere with each other's company operations, so they do not cancel.
 
 ### 2.5 A Numerical-Stability Checkup for Naive Cross Entropy
@@ -291,7 +291,7 @@ p_k
 = \frac{\exp(z_k)\exp(-z_{\max})}{\sum_{i=1}^{K}\exp(z_i)\exp(-z_{\max})}.
 $$
 
-That is, multiply both numerator and denominator by \(\exp(-z_{\max})\).
+That is, multiply both numerator and denominator by $\exp(-z_{\max})$.
 Then:
 
 $$
@@ -341,7 +341,7 @@ J_{ki}=p_k(\delta_{ki}-p_i).
 $$
 
 Here we assume class 2 is the true class: confidently wrong.
-Because Cross Entropy only uses the true-class \(p_t\), we only examine this \(p_t\), which is `p_small`.
+Because Cross Entropy only uses the true-class $p_t$, we only examine this $p_t$, which is `p_small`.
 
 $$
 J_{21}=-p_2p_1=-0\cdot 1=0,
@@ -364,8 +364,8 @@ cat("gradient passed from p_small, the true-class pt, to the zero logit: ", as.n
 #### 2.5.3 Forward `-log`
 
 The risk of non-finite values in the forward computation of `log` comes from 0 and negative numbers.
-However, \(p_k\) cannot be negative; underflowing to 0 is very possible.
-Since Cross Entropy only takes the true-class softmax probability \(p_t\), i.e. \(-\log(p_t)\), when does it become 0?
+However, $p_k$ cannot be negative; underflowing to 0 is very possible.
+Since Cross Entropy only takes the true-class softmax probability $p_t$, i.e. $-\log(p_t)$, when does it become 0?
 When the model is confidently wrong.
 
 ```{r}
@@ -378,18 +378,18 @@ But what happens to backward propagation in this situation?
 
 #### 2.5.4 Backward `-log`
 
-We know that the derivative of \(\log(x)\) is \(1/x\).
-With the negative sign in Cross Entropy, it becomes \(-1/p_t\).
+We know that the derivative of $\log(x)$ is $1/x$.
+With the negative sign in Cross Entropy, it becomes $-1/p_t$.
 
 By the chain rule:
 
-For the gradient passed from CE to \(z_t\), the true-class logit:
+For the gradient passed from CE to $z_t$, the true-class logit:
 
 $$
 -\frac{1}{p_t}p_t(1-p_t).
 $$
 
-For the gradient passed from CE to \(z_f\), a non-true-class logit:
+For the gradient passed from CE to $z_f$, a non-true-class logit:
 
 $$
 -\frac{1}{p_t}p_t(-p_f).
@@ -398,8 +398,8 @@ $$
 Although we have a strong urge to simplify and cancel terms, we already said that because we are computing Cross Entropy naively, the `log` operator and the softmax operator are independent operators, and gradient computation is fully handed over to autograd.
 We emphasized earlier that **autograd does not automatically cancel terms**. It is hard to overemphasize this.
 
-This \(p_t\) is the root cause of NaN in backward propagation.
-When \(p_t\) approaches 0, meaning the model is confidently wrong, \(-1/p_t\) becomes \(-\mathrm{Inf}\). The later multiplier \(p_t\) is also 0.
+This $p_t$ is the root cause of NaN in backward propagation.
+When $p_t$ approaches 0, meaning the model is confidently wrong, $-1/p_t$ becomes $-\mathrm{Inf}$. The later multiplier $p_t$ is also 0.
 An `Inf` multiplied by 0 naturally becomes `NaN`.
 
 ```{r}
@@ -424,7 +424,7 @@ $$
 p_i-\delta_{ti}.
 $$
 
-In vector form, it is \(p-y\), where \(y\) is the ground-truth one-hot vector.
+In vector form, it is $p-y$, where $y$ is the ground-truth one-hot vector.
 
 This is a very clean result, without any troublesome denominator.
 
@@ -432,7 +432,7 @@ Therefore, we invent a combined `log + softmax` operator and directly use the si
 
 Although we have already analyzed it in detail, let us reorganize the reasoning with more standard notation.
 
-When computing the gradient of the softmax layer, we focus on the partial derivative of the loss function \(L\) with respect to input \(z_k\):
+When computing the gradient of the softmax layer, we focus on the partial derivative of the loss function $L$ with respect to input $z_k$:
 
 $$
 \frac{\partial L}{\partial z_k}
@@ -443,26 +443,26 @@ $$
 
 Here:
 
-- \(\mathrm{grad}_i\) represents \(\frac{\partial L}{\partial y_i}\).
-- \(\delta_{ik}\) is the Kronecker delta: 1 when \(i=k\), otherwise 0.
-- \(p_k\) is the softmax output probability.
+- $\mathrm{grad}_i$ represents $\frac{\partial L}{\partial y_i}$.
+- $\delta_{ik}$ is the Kronecker delta: 1 when $i=k$, otherwise 0.
+- $p_k$ is the softmax output probability.
 
-To understand the derivation below, we must pay attention to what \(y\) refers to here.
+To understand the derivation below, we must pay attention to what $y$ refers to here.
 
 In the previous analysis, we split `-log` and softmax into two independent functions: softmax inside and `-log` outside. Together they form Cross Entropy.
-So our setting was always: \(y\) is \(-\log(x)\), and \(x\) is the result of softmax.
+So our setting was always: $y$ is $-\log(x)$, and $x$ is the result of softmax.
 Thus our chain rule was always: derivative of the outer `-log` multiplied by the Jacobian of the inner softmax.
 
-But now \(y\) has changed, because we combine `log` and softmax into one operator, `log_softmax`.
-So Cross Entropy is simply `-log_softmax`; \(y\) is very simple: \(-x\), where \(x\) is the result of `log_softmax`.
+But now $y$ has changed, because we combine `log` and softmax into one operator, `log_softmax`.
+So Cross Entropy is simply `-log_softmax`; $y$ is very simple: $-x$, where $x$ is the result of `log_softmax`.
 
-Since the gradient of Cross Entropy is \(p_i-\delta_{ti}\), adding a negative sign gives the gradient of `log_softmax`:
+Since the gradient of Cross Entropy is $p_i-\delta_{ti}$, adding a negative sign gives the gradient of `log_softmax`:
 
 $$
 \delta_{ti}-p_i.
 $$
 
-\(\frac{\partial L}{\partial y_i}\) is actually extremely simple: it is \(-1\) for the true-class `log_softmax`, and 0 otherwise.
+$\frac{\partial L}{\partial y_i}$ is actually extremely simple: it is $-1$ for the true-class `log_softmax`, and 0 otherwise.
 But we will not expand that here.
 
 Now let us do some algebra.
@@ -484,8 +484,8 @@ $$
 
 Final simplified form:
 
-Since \(\delta_{ik}\) is 0 when \(i \neq k\), the summation \(\sum_i(\mathrm{grad}_i\delta_{ik})\) leaves only the \(i=k\) term, namely \(\mathrm{grad}_k\).
-At the same time, pulling out the constant \(p_k\) gives:
+Since $\delta_{ik}$ is 0 when $i \neq k$, the summation $\sum_i(\mathrm{grad}_i\delta_{ik})$ leaves only the $i=k$ term, namely $\mathrm{grad}_k$.
+At the same time, pulling out the constant $p_k$ gives:
 
 $$
 \frac{\partial L}{\partial z_k}
@@ -521,11 +521,11 @@ Compare this with the life-and-death book for some other operators:
 ```
 
 `grad` is the upstream gradient. According to the chain rule, it appears here as a multiplier.
-`self` is the input data, the \(x\) in \(\log(x)\).
+`self` is the input data, the $x$ in $\log(x)$.
 `conj()` exists for the complex-number case; we can ignore it for now.
 `div` is division.
 
-This matches the derivative formula for \(\log(x)\), namely \(1/x\).
+This matches the derivative formula for $\log(x)$, namely $1/x$.
 
 Compare it with `sqrt`, the protagonist of the next section:
 
@@ -535,8 +535,8 @@ Compare it with `sqrt`, the protagonist of the next section:
   result: auto_element_wise
 ```
 
-`result` is the forward output of this operator, i.e. \(\sqrt{x}\) rather than \(x\).
-This also matches the derivative formula for \(\sqrt{x}\): \(1/(2\sqrt{x})\).
+`result` is the forward output of this operator, i.e. $\sqrt{x}$ rather than $x$.
+This also matches the derivative formula for $\sqrt{x}$: $1/(2\sqrt{x})$.
 
 But here, the backward propagation of `log_softmax` is delegated to a function called `_log_softmax_backward_data`.
 
@@ -629,10 +629,10 @@ if constexpr (log_softmax) {
 The `else` branch is the softmax branch. We look at `log_softmax`.
 Here:
 
-- `grad_data` \(=\) the upstream gradient \((\mathrm{d}L/\mathrm{d}\text{ output})\).
-- `output_data` \(=\) the forward output: \(\log p\) in the `log_softmax` branch, and \(p\) in the softmax branch.
-- `grad_input_data` \(=\) the result to be written in \((\mathrm{d}L/\mathrm{d}\text{ logits } z)\).
-- `dim_size` \(=\) the number of classes \(K\); `scalar_t` \(=\) the element type, such as float or double.
+- `grad_data` $=$ the upstream gradient $(\mathrm{d}L/\mathrm{d}\text{ output})$.
+- `output_data` $=$ the forward output: $\log p$ in the `log_softmax` branch, and $p$ in the softmax branch.
+- `grad_input_data` $=$ the result to be written in $(\mathrm{d}L/\mathrm{d}\text{ logits } z)$.
+- `dim_size` $=$ the number of classes $K$; `scalar_t` $=$ the element type, such as float or double.
 
 ```cpp
 auto sum = vec::reduce_all<scalar_t>(
@@ -640,7 +640,7 @@ auto sum = vec::reduce_all<scalar_t>(
 ```
 
 This line first takes `grad_data`, the upstream gradient, and sums it:
-\(\sum_i^K \mathrm{grad}_i\).
+$\sum_i^K \mathrm{grad}_i$.
 
 Next:
 
@@ -653,13 +653,13 @@ vec::map2(
     dim_size);
 ```
 
-`[sum]` captures the `sum` computed above, i.e. \(\sum_i^K \mathrm{grad}_i\).
-`[sum](Vec x, Vec y) { return x - ((y.exp()) * Vec(sum)); }` is an anonymous function, meaning that this operation is applied elementwise to vectors \(x\) and \(y\).
+`[sum]` captures the `sum` computed above, i.e. $\sum_i^K \mathrm{grad}_i$.
+`[sum](Vec x, Vec y) { return x - ((y.exp()) * Vec(sum)); }` is an anonymous function, meaning that this operation is applied elementwise to vectors $x$ and $y$.
 
-`grad_data` is the upstream gradient \(\mathrm{grad}_i\), and it is the anonymous function's `Vec x`.
-`output_data` is \(\log(p)\), which in the three-class case can be understood as the vector \((\log(p_1), \log(p_2), \log(p_3))\).
-`y.exp()` applies `exp` to \(\log(p_i)\), turning it back into \(p_i\).
-`Vec(sum)` broadcasts the upstream-computed sum into a vector and multiplies it elementwise by `y.exp()`, i.e. \(p_i\).
+`grad_data` is the upstream gradient $\mathrm{grad}_i$, and it is the anonymous function's `Vec x`.
+`output_data` is $\log(p)$, which in the three-class case can be understood as the vector $(\log(p_1), \log(p_2), \log(p_3))$.
+`y.exp()` applies `exp` to $\log(p_i)$, turning it back into $p_i$.
+`Vec(sum)` broadcasts the upstream-computed sum into a vector and multiplies it elementwise by `y.exp()`, i.e. $p_i$.
 
 Putting it all together, each element of the computed gradient vector is:
 
@@ -680,10 +680,10 @@ $$
 =-z_t+\mathrm{logsumexp}(z_i).
 $$
 
-If we take its derivative with respect to \(z_k\), what do we get?
-\(-z_t\) gives \(-\delta_{tk}\).
-The derivative of \(\mathrm{logsumexp}(z_i)\) with respect to \(z_k\) is our old friend \(\mathrm{softmax}(z_i)\), i.e. \(p_i\).
-Together, this gives \(p_i-\delta_{tk}\).
+If we take its derivative with respect to $z_k$, what do we get?
+$-z_t$ gives $-\delta_{tk}$.
+The derivative of $\mathrm{logsumexp}(z_i)$ with respect to $z_k$ is our old friend $\mathrm{softmax}(z_i)$, i.e. $p_i$.
+Together, this gives $p_i-\delta_{tk}$.
 Different paths, same destination.
 
 ## 3. The Truth About Hellinger
@@ -698,9 +698,9 @@ $$
 \frac{\sqrt{\sum_{i=1}^{K}(\delta_{ti}-\sqrt{p_i})^2}}{\sqrt{2}}.
 $$
 
-\(K\) is still the total number of classes. \(i\) is only a nominal subscript; later we will also use \(k\), and so on.
-The subscript \(t\) still represents the true class.
-\(\delta_{ti}\) is still the Kronecker delta: it equals 1 when \(i=t\), and 0 when \(i\neq t\).
+$K$ is still the total number of classes. $i$ is only a nominal subscript; later we will also use $k$, and so on.
+The subscript $t$ still represents the true class.
+$\delta_{ti}$ is still the Kronecker delta: it equals 1 when $i=t$, and 0 when $i\neq t$.
 
 That is:
 
@@ -708,7 +708,7 @@ $$
 \frac{\lVert \text{one-hot-vector}-\sqrt{p}\rVert_2}{\sqrt{2}},
 $$
 
-where \(p\) is the softmax vector.
+where $p$ is the softmax vector.
 
 If we simplify it algebraically:
 
@@ -737,7 +737,7 @@ $$
 $$
 
 Very concise.
-\(p_t\) is the true-class softmax probability.
+$p_t$ is the true-class softmax probability.
 
 ### 3.1 The Problem With `sqrt`
 
@@ -752,7 +752,7 @@ As we saw earlier in PyTorch's backward rule for `sqrt`:
 self: grad / (2 * result.conj())
 ```
 
-Once \(x \rightarrow 0\), `result`, the forward output \(\sqrt{x}\), also becomes 0, and the whole expression becomes `Inf`.
+Once $x \rightarrow 0$, `result`, the forward output $\sqrt{x}$, also becomes 0, and the whole expression becomes `Inf`.
 If the upstream `grad` is 0 at this moment, recall the softmax Jacobian: this is entirely possible.
 This is the naked source of `NaN`.
 
@@ -773,8 +773,8 @@ l$backward()
 s$grad
 ```
 Let us briefly review why the second program becomes `NaN`.
-Let \(y=g(f(x))\), where \(f(x)=x^2\), and \(g(y)=\sqrt{y}\).
-Then \(f'(x)=2x\), and \(g'(y)=1/(2\sqrt{y})\).
+Let $y=g(f(x))$, where $f(x)=x^2$, and $g(y)=\sqrt{y}$.
+Then $f'(x)=2x$, and $g'(y)=1/(2\sqrt{y})$.
 By the chain rule, the gradient of `s` in the second program is:
 
 $$
@@ -784,7 +784,7 @@ $$
 Do you feel the urge to simplify and cancel terms?
 For the third time in this post, I emphasize: **autograd does not automatically differentiate algebraically!**
 
-If \(s=0\), or if it is close enough to 0 in the eyes of float32 (recall the smallest positive subnormal number discussed at the beginning), then \(1/(2\sqrt{s^2})\) is `Inf`, and \(s\) is 0.
+If $s=0$, or if it is close enough to 0 in the eyes of float32 (recall the smallest positive subnormal number discussed at the beginning), then $1/(2\sqrt{s^2})$ is `Inf`, and $s$ is 0.
 `Inf * 0` becomes a gorgeous `NaN`.
 
 ### 3.2 Re-examining Hellinger Distance
@@ -812,12 +812,12 @@ $$
 
 This is under the outer square root.
 What else appears?
-\(p_k\), including two cases: \(p_t\), only one true-class probability, and \(p_f\), multiple non-true-class probabilities, one fewer than the total number of classes.
+$p_k$, including two cases: $p_t$, only one true-class probability, and $p_f$, multiple non-true-class probabilities, one fewer than the total number of classes.
 
-For the inner \(p_k\), when do we encounter the problem?
+For the inner $p_k$, when do we encounter the problem?
 
-- \(p_t \rightarrow 0\) for the true class: confidently wrong.
-- \(p_f \rightarrow 0\) for false classes: confidently correct.
+- $p_t \rightarrow 0$ for the true class: confidently wrong.
+- $p_f \rightarrow 0$ for false classes: confidently correct.
 
 For a non-true class:
 
@@ -831,9 +831,9 @@ $$
 2\sqrt{p_f}\cdot \frac{1}{2\sqrt{p_f}}.
 $$
 
-When \(p_f \rightarrow 0\), \(\sqrt{p_f}\) approaches 0, and the derivative of \(\sqrt{p_k}\) approaches infinity.
+When $p_f \rightarrow 0$, $\sqrt{p_f}$ approaches 0, and the derivative of $\sqrt{p_k}$ approaches infinity.
 The result is `NaN`.
-When \(p_f \rightarrow 1\), the value is finite.
+When $p_f \rightarrow 1$, the value is finite.
 
 For the true class:
 
@@ -847,22 +847,22 @@ $$
 2(1-\sqrt{p_t})\left(-\frac{1}{2\sqrt{p_t}}\right).
 $$
 
-When \(p_t \rightarrow 0\), the expression is \(-\mathrm{Inf}\).
-When \(p_t \rightarrow 1\), the expression is 0.
+When $p_t \rightarrow 0$, the expression is $-\mathrm{Inf}$.
+When $p_t \rightarrow 1$, the expression is 0.
 
-For the outer \(S\):
-when our prediction is close to perfect, meaning \((p_1,p_2,p_3)\) is close to the one-hot ground truth, \(S \rightarrow 0\).
-Then \(1/(2\sqrt{S})\) is `Inf`; otherwise it is finite.
+For the outer $S$:
+when our prediction is close to perfect, meaning $(p_1,p_2,p_3)$ is close to the one-hot ground truth, $S \rightarrow 0$.
+Then $1/(2\sqrt{S})$ is `Inf`; otherwise it is finite.
 
 Putting it together:
 
 Confidently correct:
-\(p_t \rightarrow 1\), other \(p_f \rightarrow 0\), the outer layer is `Inf`, the inner non-true classes are already `NaN`, and the inner true-class expression is 0.
+$p_t \rightarrow 1$, other $p_f \rightarrow 0$, the outer layer is `Inf`, the inner non-true classes are already `NaN`, and the inner true-class expression is 0.
 `Inf * 0` is `NaN`.
-So whichever \(p_k\) we look at, it is `NaN`.
+So whichever $p_k$ we look at, it is `NaN`.
 
 Confidently wrong:
-\(p_t \rightarrow 0\), the outer layer is finite, the inner true class has \(-\mathrm{Inf}\), and if a non-true-class \(p_f \rightarrow 0\), the result is `NaN`; if the non-true-class probability is finite or 1, the result is finite.
+$p_t \rightarrow 0$, the outer layer is finite, the inner true class has $-\mathrm{Inf}$, and if a non-true-class $p_f \rightarrow 0$, the result is `NaN`; if the non-true-class probability is finite or 1, the result is finite.
 
 Verify this with code.
 
@@ -888,8 +888,8 @@ hd_confidnet_wrong$backward()
 p$grad
 ```
 The outer layer is finite, so everything depends on the inner layer.
-Our analysis said that the inner true class has \(-\mathrm{Inf}\), and indeed we saw `-Inf`.
-For a non-true class with \(p_f \rightarrow 0\), the result is `NaN`, and indeed the third entry is `NaN`.
+Our analysis said that the inner true class has $-\mathrm{Inf}$, and indeed we saw `-Inf`.
+For a non-true class with $p_f \rightarrow 0$, the result is `NaN`, and indeed the third entry is `NaN`.
 A non-true class that is finite or equal to 1 has a finite value.
 
 These gradients are then propagated to the logits.
@@ -909,8 +909,8 @@ $$
 -\frac{1}{4\sqrt{p_t}\sqrt{1-\sqrt{p_t}}}.
 $$
 
-Thus when \(p_t \rightarrow 0\) or \(p_t \rightarrow 1\), \(-\mathrm{Inf}\) appears.
-This formula only considers the true class, so the gradient with respect to \(p_f\) is 0.
+Thus when $p_t \rightarrow 0$ or $p_t \rightarrow 1$, $-\mathrm{Inf}$ appears.
+This formula only considers the true class, so the gradient with respect to $p_f$ is 0.
 
 Verify with code:
 
@@ -932,11 +932,11 @@ Indeed, as expected.
 
 Now include the softmax Jacobian.
 
-For the true class, we need to multiply by \(p_t(1-p_t)\). When \(p_t \rightarrow 0\) or \(p_t \rightarrow 1\), this term is 0.
-Together with the previous \(-\mathrm{Inf}\), both confident correctness and confident wrongness produce `NaN`.
+For the true class, we need to multiply by $p_t(1-p_t)$. When $p_t \rightarrow 0$ or $p_t \rightarrow 1$, this term is 0.
+Together with the previous $-\mathrm{Inf}$, both confident correctness and confident wrongness produce `NaN`.
 
-For a non-true class, we need to multiply by \(-p_tp_f\).
-If \(p_t=0\) or \(p_f=0\), `NaN` will appear.
+For a non-true class, we need to multiply by $-p_tp_f$.
+If $p_t=0$ or $p_f=0$, `NaN` will appear.
 In other words, both confident correctness and confident wrongness produce `NaN`.
 So everything should be wiped out.
 Look at the following program.
@@ -959,8 +959,8 @@ z$grad
 ```
 Correct.
 
-Of course, minimizing \(\sqrt{1-\sqrt{p_t}}\) can be analyzed.
-But it is also simply minimizing \(1-\sqrt{p_t}\), i.e. minimizing \(-\sqrt{p_t}\), which makes our life easier.
+Of course, minimizing $\sqrt{1-\sqrt{p_t}}$ can be analyzed.
+But it is also simply minimizing $1-\sqrt{p_t}$, i.e. minimizing $-\sqrt{p_t}$, which makes our life easier.
 
 The derivative is:
 
@@ -968,8 +968,8 @@ $$
 -\frac{1}{2\sqrt{p_t}}.
 $$
 
-\(p_t\) still inevitably appears in the denominator.
-When \(p_t \rightarrow 0\), i.e. when confidently wrong, it becomes \(-\mathrm{Inf}\).
+$p_t$ still inevitably appears in the denominator.
+When $p_t \rightarrow 0$, i.e. when confidently wrong, it becomes $-\mathrm{Inf}$.
 
 Including the softmax Jacobian:
 
@@ -987,11 +987,11 @@ $$
 
 If we hand this to autograd:
 
-For the true class, when \(p_t \rightarrow 0\):
-\(-\mathrm{Inf}\cdot 0 \rightarrow \mathrm{NaN}\).
+For the true class, when $p_t \rightarrow 0$:
+$-\mathrm{Inf}\cdot 0 \rightarrow \mathrm{NaN}$.
 In the confidently correct case, it is finite.
 
-For a non-true class, when \(p_t \rightarrow 0\), the same logic applies.
+For a non-true class, when $p_t \rightarrow 0$, the same logic applies.
 In the confidently correct case, it is 0.
 
 In other words, we have reduced the numerically unstable situation to only the case where the model is confidently wrong about the true class.
@@ -1006,7 +1006,7 @@ cat("p's grad: ", as.numeric(p$grad), "\n")
 cat("z's grad: ", as.numeric(z$grad), "\n")
 ```
 When confidently correct, there is no problem.
-The gradient of \(z\) becoming 0 is understandable: after all, the prediction is already close to successful.
+The gradient of $z$ becoming 0 is understandable: after all, the prediction is already close to successful.
 
 ```{r}
 z <- torch_tensor(c(1000, 0, 0), dtype = torch_float32(), requires_grad = TRUE)
@@ -1026,7 +1026,7 @@ There are several solutions.
 
 #### 3.3.1 Custom Autograd Operator
 
-First, look at the simplest case: minimizing \(-\sqrt{p_t}\).
+First, look at the simplest case: minimizing $-\sqrt{p_t}$.
 
 Return to our calculation.
 
@@ -1067,7 +1067,7 @@ $$
 = \frac{1}{2}(p_i-\delta_{ti})\sqrt{p_t}.
 $$
 
-But this introduces another problem: when \(p_t=0\), the gradient is 0, and there is no training force.
+But this introduces another problem: when $p_t=0$, the gradient is 0, and there is no training force.
 Training dynamics are a story for later posts in this series, as mentioned at the beginning of this post.
 
 Because **autograd does not automatically simplify for us** (the fourth time this is mentioned), we need to merge `sqrt` and softmax into one operator.
@@ -1139,7 +1139,7 @@ The shape does not change; it is still `(batch_num, class_num)`.
 
 `targets$unsqueeze(2)` adds one dimension to the one-dimensional tensor, turning it into `(batch_num, 1)`, so that it can work with the later `gather` function.
 `p$gather(dim = 2, index = targets_2d)` means: along the second dimension, i.e. the class dimension, pick out the indices in `target_2d`.
-This obtains the true-class \(p_t\).
+This obtains the true-class $p_t$.
 Then `squeeze(2)` changes the shape back to `(batch_num,)`.
 
 `loss <- (- torch_sqrt(p_t))$mean()` averages the loss over the current batch.
@@ -1170,12 +1170,12 @@ $$
 $$
 
 Here `p` has shape `(batch_num, class_num)`, while `sqrt_p_t` has shape `(batch_num, 1)` because of the previous `unsqueeze`.
-This triggers broadcasting of `sqrt_p_t`, so every \(p_i\) is multiplied by \(\sqrt{p_t}\).
+This triggers broadcasting of `sqrt_p_t`, so every $p_i$ is multiplied by $\sqrt{p_t}$.
 
 For non-true classes, this completes the calculation.
-But for the true class, where \(i=t\), we are not done.
+But for the true class, where $i=t$, we are not done.
 Therefore, we create `grad_true_class`.
-For non-true classes it is 0; for the true class, we still need to subtract \(\frac{1}{2}\sqrt{p_t}\).
+For non-true classes it is 0; for the true class, we still need to subtract $\frac{1}{2}\sqrt{p_t}$.
 Finally, we divide by `batch_size` because we also averaged the loss.
 Do not forget `grad_output`, the upstream gradient, which must be multiplied in according to the chain rule.
 The final `grad_logits` still has shape `(batch_num, class_num)`.
@@ -1194,7 +1194,7 @@ How should we understand this key piece of code?
 The `scatter` operation with `dim = 2` tells the sniper rifle: fire along the column, i.e. class, dimension.
 `index = targets$unsqueeze(2)` says where the bullet should hit.
 `src = 0.5 * sqrt_p_t` says what powder is inside the bullet:
-put \((batch_num, 1)\)-shaped \(\frac{1}{2}\sqrt{p_t}\) into it.
+put $(batch_num, 1)$-shaped $\frac{1}{2}\sqrt{p_t}$ into it.
 
 Written!
 
@@ -1217,9 +1217,9 @@ loss$backward()
 cat("\n--- Final returned logits gradient ---")
 logits$grad
 ```
-What if we wrap it with the outer square root, \(\sqrt{1-\sqrt{p_t}}\)?
+What if we wrap it with the outer square root, $\sqrt{1-\sqrt{p_t}}$?
 
-For true-class logits, using some algebraic simplification tricks, namely multiplying numerator and denominator by \(\sqrt{1-\sqrt{p_t}}\), then multiplying both by \(1+\sqrt{p_t}\), gives the gradient:
+For true-class logits, using some algebraic simplification tricks, namely multiplying numerator and denominator by $\sqrt{1-\sqrt{p_t}}$, then multiplying both by $1+\sqrt{p_t}$, gives the gradient:
 
 $$
 -\frac{1}{4}\sqrt{1-\sqrt{p_t}}(1+\sqrt{p_t})\sqrt{p_t}.
@@ -1238,11 +1238,11 @@ $$
 The denominator cannot be eliminated.
 
 The non-true-class case is even funnier:
-the denominator is 0 when \(1-p_t=0\), i.e. when \(p_t\) approaches 1, meaning the model is approaching success.
-When it is 0, there is no gradient; when \(p_f=0\), there will be `NaN`.
+the denominator is 0 when $1-p_t=0$, i.e. when $p_t$ approaches 1, meaning the model is approaching success.
+When it is 0, there is no gradient; when $p_f=0$, there will be `NaN`.
 
 This is a bit hard. I did not think of a solution immediately.
-But \(1-p_t\) is exactly the sum of all \(p_f\)'s, isn't it?
+But $1-p_t$ is exactly the sum of all $p_f$'s, isn't it?
 Maybe if the non-true classes can be added together, this denominator can be eliminated.
 Let us discuss this in the future.
 
@@ -1253,7 +1253,7 @@ Since `sqrt` is the root of all evil, we need to protect it carefully.
 We will write our own `safe_sqrt`.
 The goals:
 
-1. Do not ruin forward propagation. If `safe_sqrt` computes \(\sqrt{0}=1\), it breaks the forward pass, even though we will go through this step later.
+1. Do not ruin forward propagation. If `safe_sqrt` computes $\sqrt{0}=1$, it breaks the forward pass, even though we will go through this step later.
 2. Make backward propagation safe: do not allow 0 to appear in the denominator.
 
 Now we are short-sighted people.
@@ -1272,12 +1272,12 @@ result$backward()
 cat("result (forward): ", as.numeric(result), "\n")
 cat("grad (back): ", as.numeric(zero$grad), "\n")
 ```
-We bent the gradient from `Inf` into 0.5, because we forcibly shifted \(x\) by a constant 1.
+We bent the gradient from `Inf` into 0.5, because we forcibly shifted $x$ by a constant 1.
 Whether the shift is 1, 2, or any other number is a design degree of freedom.
 
 But the forward pass is broken.
 The next step is to fix the forward pass.
-It only breaks when \(x=0\):
+It only breaks when $x=0$:
 
 ```{r}
 safe_sqrt <- function(x){
@@ -1321,16 +1321,16 @@ $$
 
 All of them can be handed to autograd without problems.
 The concern is that this changes the training dynamics:
-where there should have been an infinite gradient at \(x=0\), it now becomes an arbitrarily designed number.
+where there should have been an infinite gradient at $x=0$, it now becomes an arbitrarily designed number.
 The dynamics change.
-But we can design it to shift by a very large number, so that when \(x=0\), or when it underflows to 0, there is still plenty of force.
+But we can design it to shift by a very large number, so that when $x=0$, or when it underflows to 0, there is still plenty of force.
 
 #### 3.3.3 Other Solutions
 
 I collectively call these epsilon schemes.
 These methods are all direct, and their ideas are simple.
 
-For example, `clamp`: since numerical instability appears when \(p\) reaches an extreme value, we prevent it from reaching that extreme by restricting it to \((0+\varepsilon, 1-\varepsilon)\).
+For example, `clamp`: since numerical instability appears when $p$ reaches an extreme value, we prevent it from reaching that extreme by restricting it to $(0+\varepsilon, 1-\varepsilon)$.
 
 Or more directly:
 
@@ -1338,7 +1338,7 @@ $$
 \sqrt{\max(x,\varepsilon)}.
 $$
 
-Before entering \(\sqrt{\cdot}\), lift any input smaller than \(\varepsilon\) up to \(\varepsilon\), so \(\sqrt{\cdot}\) never sees a number smaller than \(\varepsilon\).
+Before entering $\sqrt{\cdot}$, lift any input smaller than $\varepsilon$ up to $\varepsilon$, so $\sqrt{\cdot}$ never sees a number smaller than $\varepsilon$.
 
 Another example: protect `sqrt` with epsilon:
 
@@ -1351,15 +1351,15 @@ They will be discussed in future posts during empirical tests on real datasets o
 
 ## 4. Philosophical Reflection and Preview of the Next Episode
 
-Minimizing \(1-\sqrt{p_t}\) and minimizing \(-\log(p_t)\) are both maximizing \(p_t\), aren't they?
+Minimizing $1-\sqrt{p_t}$ and minimizing $-\log(p_t)$ are both maximizing $p_t$, aren't they?
 Are they not the same thing?
-And even more directly, what about making the loss function \(-p_t\)?
+And even more directly, what about making the loss function $-p_t$?
 
 The answer is training dynamics:
 how to train more effectively and reach our goal faster.
 
-For example, after gradient analysis, \(-\sqrt{p_t}\) has a vanishing gradient at 0.
-When \(p_t=0\), \(-\log(p_t)\) has strong gradient force.
+For example, after gradient analysis, $-\sqrt{p_t}$ has a vanishing gradient at 0.
+When $p_t=0$, $-\log(p_t)$ has strong gradient force.
 
 Some people have proposed q-loss, also called generalized cross entropy:
 
@@ -1367,7 +1367,7 @@ $$
 \frac{1-p_t^q}{q},
 $$
 
-where \(q\) is between 0 and 1.
+where $q$ is between 0 and 1.
 
 Reference:
 
@@ -1383,7 +1383,7 @@ Reference:
 }
 ```
 
-Using L'Hopital's rule to take the gradient, when \(q \rightarrow 0\), the gradient of:
+Using L'Hopital's rule to take the gradient, when $q \rightarrow 0$, the gradient of:
 
 $$
 \frac{1-p_t^q}{q}
@@ -1396,9 +1396,9 @@ $$
 $$
 
 Isn't this exactly the familiar gradient of Cross Entropy?
-So the paper says that when \(q\) approaches 0, it becomes CE, more rigorously called Categorical Cross Entropy (CCE).
+So the paper says that when $q$ approaches 0, it becomes CE, more rigorously called Categorical Cross Entropy (CCE).
 
-What is \(q=1/2\)?
+What is $q=1/2$?
 Doesn't it look like the simplified Hellinger Distance?
 
 Whether it is a numerical-stability problem or a training-dynamics problem, in the end, we still need many experiments to validate our various schemes and ideas.
