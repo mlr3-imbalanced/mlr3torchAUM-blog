@@ -3,7 +3,7 @@ title: "Softmax, Cross Entropy, and Hellinger Loss: A Numerical-Stability Tour"
 author: "Wei Cao"
 date: "2026-06-25"
 categories: [R, torch, numerical-stability]
-description: "A faithful English translation of the original notebook on forward and backward numerical stability for softmax-based losses."
+description: "Forward and backward numerical stability for softmax-based losses."
 ---
 
 ## Goal
