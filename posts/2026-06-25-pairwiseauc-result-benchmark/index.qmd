@@ -242,11 +242,11 @@ outputs using `all.equal`.
 ```{r}
 surr_names <- c("squared", "squared_hinge", "hinge", "logistic", "barrier_hinge")
 scenarios <- list(
-  typical    = list(N = 100L, n_pos = 10L),
-  minority   = list(N = 100L, n_pos = 2L),
-  balanced   = list(N = 100L, n_pos = 50L),
-  single_pos = list(N = 100L, n_pos = 1L),
-  all_same   = list(N = 100L, n_pos = 100L)
+  typical    = list(N = c(100L, 200L), get_n_pos = function(N) as.integer(N * 0.10)),
+  minority   = list(N = c(100L, 200L), get_n_pos = function(N) as.integer(N * 0.02)),
+  balanced   = list(N = c(100L, 200L), get_n_pos = function(N) as.integer(N * 0.50)),
+  single_pos = list(N = c(100L, 200L), get_n_pos = function(N) 1L),
+  all_same   = list(N = c(100L, 200L), get_n_pos = function(N) N)
 )
 result_list <- list()
 
@@ -258,10 +258,11 @@ for (surr in surr_names) {
       result = TRUE,
       setup = {
         torch::torch_manual_seed(42L)
-        n_neg <- N - sc$n_pos
+        n_pos <- sc$get_n_pos(N)
+        n_neg <- N - n_pos
         y_pred_r <- torch::torch_randn(N, dtype = torch::torch_float32())
         y_true_r <- torch::torch_tensor(
-          c(rep(1, sc$n_pos), rep(0, n_neg)), dtype = torch::torch_float32()
+          c(rep(1, n_pos), rep(0, n_neg)), dtype = torch::torch_float32()
         )
       },
       R = {
