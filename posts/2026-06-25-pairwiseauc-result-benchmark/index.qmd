@@ -25,10 +25,11 @@ First, we load the necessary libraries. We use `reticulate` to install Python de
 library(reticulate)
 
 # Install Python dependencies into a self-contained virtual environment.
-# On GitHub Actions (Ubuntu), reticulate uses the system Python set up
-# by the `actions/setup-python` workflow step.
 if (!reticulate::py_module_available("libauc") || !reticulate::py_module_available("torch")) {
-  reticulate::py_install(c("torch", "libauc"))
+  # Install PyTorch CPU version first to avoid CUDA C++ ABI conflicts with R's libtorch
+  reticulate::py_install("torch", pip_options = c("--index-url", "https://download.pytorch.org/whl/cpu"))
+  # Then install libauc (which will see torch is already installed)
+  reticulate::py_install("libauc")
 }
 
 # Install the R torch C++ backend (Lantern/LibTorch) if not yet downloaded.
