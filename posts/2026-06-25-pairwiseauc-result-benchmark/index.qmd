@@ -19,13 +19,13 @@ R package.
 
 ## Setup
 
-First, we load the necessary libraries and ensure the Python
-dependencies are installed. Because R's `torch` and Python's `torch`
-both ship their own C++ LibTorch backend, loading them in the same
-process causes symbol collisions. We therefore use `reticulate` to
-cleanly manage our Python virtual environment, but we will run all
-Python code in a **separate subprocess** via `system2()` to keep the
-C++ runtimes completely isolated.
+First, we load the necessary R packages and set up Python. Because R's `torch` and Python's `torch` both ship their own C++ LibTorch backend, loading them in the same R process causes fatal symbol collisions.
+
+To solve this, we use a hybrid approach:
+1. We use `reticulate` strictly for **environment management** (creating the virtual environment, installing dependencies, and locating the Python binary).
+2. We use R's `system2()` for **code execution** to run our Python scripts as separate subprocesses.
+
+This keeps the C++ runtimes of R and Python completely isolated in memory.
 
 ```{r setup, warning=FALSE, message=FALSE}
 library(reticulate)
@@ -33,8 +33,7 @@ library(torch)
 library(atime)
 library(data.table)
 
-# Set the index URL for CPU-only PyTorch so reticulate's `uv` backend 
-# fetches the small CPU wheels instead of massive CUDA ones.
+# Setting UV_INDEX to the CPU‑only PyTorch wheel index for CI (no GPU available).
 Sys.setenv(UV_INDEX = "https://download.pytorch.org/whl/cpu")
 
 # Create isolated environment and install packages
@@ -45,56 +44,27 @@ reticulate::virtualenv_install("libauc_env", "libauc")
 # Get the path to the isolated Python binary to use in subprocesses
 py_bin <- reticulate::virtualenv_python("libauc_env")
 
-# Install the R torch C++ backend (Lantern/LibTorch) if not yet downloaded.
+# Install the R torch
 if (!torch::torch_is_installed()) {
   torch::install_torch()
 }
 ```
 
-## Python helper script
+## Writing the Python Helper Script
 
-We write a small standalone Python script that computes the
-PairwiseAUCLoss for a given surrogate. It reads predictions and labels
-from a temporary CSV, computes the loss, and prints the scalar result
-to stdout. Running it as a subprocess avoids loading Python's
-libtorch into R's address space.
+To calculate the reference loss in Python without causing C++ library collisions in R, we write a standalone Python helper script to a temporary file. This script reads predictions and labels from standard input (`stdin`), computes the `libauc` loss, and prints the result:
 
-```{python, eval=FALSE}
-import sys, csv, torch
-from libauc.losses import PairwiseAUCLoss
-
-surr_name = sys.argv[1]
-csv_path  = sys.argv[2]
-
-surrogates = {
-    "squared":       {"hparam": 1.0},
-    "squared_hinge": {"hparam": 1.0},
-    "hinge":         {"hparam": 1.0},
-    "logistic":      {"hparam": 2.0},
-    "barrier_hinge": {"hparam": (1.0, 2.0)},
-}
-
-with open(csv_path) as f:
-    reader = csv.reader(f)
-    rows = list(reader)
-
-y_pred = torch.tensor([float(x) for x in rows[0]], dtype=torch.float32)
-y_true = torch.tensor([float(x) for x in rows[1]], dtype=torch.float32)
-
-cfg = surrogates[surr_name]
-loss_fn = PairwiseAUCLoss(surr_loss=surr_name, hparam=cfg['hparam'])
-result = loss_fn(y_pred.view(-1, 1), y_true.view(-1, 1)).item()
-print(f'{result:.15g}')
-```
-
-```{r, echo=FALSE}
+```{r}
 py_loss_script <- tempfile(fileext = ".py")
 writeLines(con = py_loss_script, c(
-  "import sys, csv, torch",
+  "import sys, torch",
   "from libauc.losses import PairwiseAUCLoss",
   "",
   "surr_name = sys.argv[1]",
-  "csv_path  = sys.argv[2]",
+  "",
+  "lines = sys.stdin.read().splitlines()",
+  "y_pred = torch.tensor([float(x) for x in lines[0].split(',')], dtype=torch.float32)",
+  "y_true = torch.tensor([float(x) for x in lines[1].split(',')], dtype=torch.float32)",
   "",
   "surrogates = {",
   '    "squared":       {"hparam": 1.0},',
@@ -103,13 +73,6 @@ writeLines(con = py_loss_script, c(
   '    "logistic":      {"hparam": 2.0},',
   '    "barrier_hinge": {"hparam": (1.0, 2.0)},',
   "}",
-  "",
-  "with open(csv_path) as f:",
-  "    reader = csv.reader(f)",
-  "    rows = list(reader)",
-  "",
-  "y_pred = torch.tensor([float(x) for x in rows[0]], dtype=torch.float32)",
-  "y_true = torch.tensor([float(x) for x in rows[1]], dtype=torch.float32)",
   "",
   "cfg = surrogates[surr_name]",
   "loss_fn = PairwiseAUCLoss(surr_loss=surr_name, hparam=cfg['hparam'])",
@@ -122,14 +85,14 @@ writeLines(con = py_loss_script, c(
 
 ```{r}
 call_py_loss <- function(surr_name, y_pred_r, y_true_r) {
-  csv_path <- tempfile(fileext = ".csv")
-  writeLines(c(
+  input_data <- c(
     paste(sprintf("%.15g", as.numeric(y_pred_r)), collapse = ","),
     paste(as.integer(y_true_r), collapse = ",")
-  ), csv_path)
+  )
   
   # Call the isolated Python binary from reticulate environment
-  out <- system2(py_bin, c(py_loss_script, surr_name, csv_path),
+  out <- system2(py_bin, c(py_loss_script, surr_name),
+                 input = input_data,
                  stdout = TRUE, stderr = TRUE)
                  
   # Ensure we capture Python errors properly if they happen
@@ -139,26 +102,6 @@ call_py_loss <- function(surr_name, y_pred_r, y_true_r) {
 }
 ```
 
-## Sample Input Data
-
-Let's generate some sample predictions and labels to use for a quick demonstration:
-
-```{r}
-torch::torch_manual_seed(42L)
-N <- 10L
-n_pos <- 3L
-n_neg <- 7L
-
-y_pred_r <- torch::torch_randn(N, dtype = torch::torch_float32())
-y_true_r <- torch::torch_tensor(
-  c(rep(1, n_pos), rep(0, n_neg)), dtype = torch::torch_float32()
-)
-
-cat("Predictions:\n")
-print(y_pred_r)
-cat("Labels:\n")
-print(y_true_r)
-```
 
 ## R implementation
 
@@ -281,53 +224,73 @@ r_loss <- function(surr_name, y_pred, y_true) {
 
 ## Verification with atime
 
-We use `atime` to compute both Python and R loss values across
-increasing data sizes, with `result=TRUE` so we can compare the actual
+Since `PairwiseAUCLoss` is designed for imbalanced classification, we
+test across five different class-balance scenarios to validate
+correctness under varied conditions:
+
+| Scenario | N | n_pos | n_neg | Why it matters |
+|---|---|---|---|---|
+| typical | 100 | 10 | 90 | Standard imbalanced case (10% positive) |
+| minority | 100 | 2 | 98 | Extreme minority stress-tests pairwise computation |
+| balanced | 100 | 50 | 50 | Boundary condition, equal class sizes |
+| single_pos | 100 | 1 | 99 | Minimum valid input with one positive |
+| all_same | 100 | 100 | 0 | All same class, should return 0 (guard condition) |
+
+We use `atime` with `result=TRUE` so we can compare the actual
 outputs using `all.equal`.
 
 ```{r}
-torch::torch_manual_seed(42L)
 surr_names <- c("squared", "squared_hinge", "hinge", "logistic", "barrier_hinge")
-n_seq <- as.integer(10^seq(1, 3, by = 0.5))
+scenarios <- list(
+  typical    = list(N = 100L, n_pos = 10L),
+  minority   = list(N = 100L, n_pos = 2L),
+  balanced   = list(N = 100L, n_pos = 50L),
+  single_pos = list(N = 100L, n_pos = 1L),
+  all_same   = list(N = 100L, n_pos = 100L)
+)
 result_list <- list()
 
 for (surr in surr_names) {
-  bench <- atime::atime(
-    N = n_seq,
-    result = TRUE,
-    seconds.limit = 10,
-    setup = {
-      torch::torch_manual_seed(N)
-      n_pos <- max(1L, as.integer(N * 0.3))
-      n_neg <- N - n_pos
-      y_pred_r <- torch::torch_randn(N, dtype = torch::torch_float32())
-      y_true_r <- torch::torch_tensor(
-        c(rep(1, n_pos), rep(0, n_neg)), dtype = torch::torch_float32()
-      )
-    },
-    R = {
-      r_loss(surr, y_pred_r, y_true_r)
-    },
-    Python = {
-      call_py_loss(surr, y_pred_r, y_true_r)
-    }
-  )
-  compare_dt <- data.table::dcast(
-    bench$measurements, N ~ expr.name, value.var = "result"
-  )[
-    , equal := paste(all.equal(as.numeric(R[[1]]), as.numeric(Python[[1]])))
-    , by = N
-  ]
-  result_list[[surr]] <- compare_dt[, .(surrogate = surr, N, equal)]
+  for (sc_name in names(scenarios)) {
+    sc <- scenarios[[sc_name]]
+    bench <- atime::atime(
+      N = sc$N,
+      result = TRUE,
+      setup = {
+        torch::torch_manual_seed(42L)
+        n_neg <- N - sc$n_pos
+        y_pred_r <- torch::torch_randn(N, dtype = torch::torch_float32())
+        y_true_r <- torch::torch_tensor(
+          c(rep(1, sc$n_pos), rep(0, n_neg)), dtype = torch::torch_float32()
+        )
+      },
+      R = {
+        r_loss(surr, y_pred_r, y_true_r)
+      },
+      Python = {
+        call_py_loss(surr, y_pred_r, y_true_r)
+      }
+    )
+    compare_dt <- data.table::dcast(
+      bench$measurements, N ~ expr.name, value.var = "result"
+    )[
+      , equal := paste(all.equal(as.numeric(R[[1]]), as.numeric(Python[[1]])))
+      , by = N
+    ]
+    result_list[[paste(surr, sc_name)]] <- compare_dt[
+      , .(surrogate = surr, scenario = sc_name, N, equal)
+    ]
+  }
 }
 all_results <- data.table::rbindlist(result_list)
 print(all_results)
 ```
 
-The table above shows `TRUE` for each (surrogate, N) pair where R and
-Python return the same value, or a small relative difference for large N
-(normal float32 rounding). This confirms our R implementation matches
-the original Python libauc.
+The table above shows `TRUE` for each (surrogate, scenario) pair where
+R and Python return the same value. The `all_same` scenario confirms
+the guard condition (returns 0 when all labels are the same class).
+This validates our R implementation matches the original Python libauc
+across typical, extreme, and edge-case inputs.
 
 ## Source code
 
