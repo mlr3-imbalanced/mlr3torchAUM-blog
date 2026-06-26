@@ -76,7 +76,10 @@ writeLines(con = py_loss_script, c(
   "",
   "cfg = surrogates[surr_name]",
   "loss_fn = PairwiseAUCLoss(surr_loss=surr_name, hparam=cfg['hparam'])",
-  "result = loss_fn(y_pred.view(-1, 1), y_true.view(-1, 1)).item()",
+  "if (y_true == y_true[0]).all():",
+  "    result = 0.0",
+  "else:",
+  "    result = loss_fn(y_pred.view(-1, 1), y_true.view(-1, 1)).item()",
   "print(f'{result:.15g}')"
 ))
 ```
