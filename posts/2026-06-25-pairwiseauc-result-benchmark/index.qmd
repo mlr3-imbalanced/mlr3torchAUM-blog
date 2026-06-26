@@ -19,27 +19,124 @@ R package.
 
 ## Setup
 
-First, we load the necessary libraries. We use `reticulate` to install Python dependencies into an isolated virtual environment, and ensure the R `torch` Lantern backend is available.
+First, we load the necessary libraries and ensure the Python
+dependencies are installed. Because R's `torch` and Python's `torch`
+both ship their own C++ LibTorch backend, loading them in the same
+process causes symbol collisions. We therefore use `reticulate` to
+cleanly manage our Python virtual environment, but we will run all
+Python code in a **separate subprocess** via `system2()` to keep the
+C++ runtimes completely isolated.
 
 ```{r setup, warning=FALSE, message=FALSE}
 library(reticulate)
+library(torch)
+library(atime)
+library(data.table)
 
-# Install Python dependencies into a self-contained virtual environment.
-if (!reticulate::py_module_available("libauc") || !reticulate::py_module_available("torch")) {
-  # Install PyTorch CPU version first to avoid CUDA C++ ABI conflicts with R's libtorch
-  reticulate::py_install("torch", pip_options = c("--index-url", "https://download.pytorch.org/whl/cpu"))
-  # Then install libauc (which will see torch is already installed)
-  reticulate::py_install("libauc")
-}
+# Set the index URL for CPU-only PyTorch so reticulate's `uv` backend 
+# fetches the small CPU wheels instead of massive CUDA ones.
+Sys.setenv(UV_INDEX = "https://download.pytorch.org/whl/cpu")
+
+# Create isolated environment and install packages
+reticulate::virtualenv_create("libauc_env")
+reticulate::virtualenv_install("libauc_env", "torch")
+reticulate::virtualenv_install("libauc_env", "libauc")
+
+# Get the path to the isolated Python binary to use in subprocesses
+py_bin <- reticulate::virtualenv_python("libauc_env")
 
 # Install the R torch C++ backend (Lantern/LibTorch) if not yet downloaded.
 if (!torch::torch_is_installed()) {
   torch::install_torch()
 }
+```
 
-library(torch)
-library(atime)
-library(data.table)
+## Python helper script
+
+We write a small standalone Python script that computes the
+PairwiseAUCLoss for a given surrogate. It reads predictions and labels
+from a temporary CSV, computes the loss, and prints the scalar result
+to stdout. Running it as a subprocess avoids loading Python's
+libtorch into R's address space.
+
+```{python, eval=FALSE}
+import sys, csv, torch
+from libauc.losses import PairwiseAUCLoss
+
+surr_name = sys.argv[1]
+csv_path  = sys.argv[2]
+
+surrogates = {
+    "squared":       {"hparam": 1.0},
+    "squared_hinge": {"hparam": 1.0},
+    "hinge":         {"hparam": 1.0},
+    "logistic":      {"hparam": 2.0},
+    "barrier_hinge": {"hparam": (1.0, 2.0)},
+}
+
+with open(csv_path) as f:
+    reader = csv.reader(f)
+    rows = list(reader)
+
+y_pred = torch.tensor([float(x) for x in rows[0]], dtype=torch.float32)
+y_true = torch.tensor([float(x) for x in rows[1]], dtype=torch.float32)
+
+cfg = surrogates[surr_name]
+loss_fn = PairwiseAUCLoss(surr_loss=surr_name, hparam=cfg['hparam'])
+result = loss_fn(y_pred.view(-1, 1), y_true.view(-1, 1)).item()
+print(f'{result:.15g}')
+```
+
+```{r, echo=FALSE}
+py_loss_script <- tempfile(fileext = ".py")
+writeLines(con = py_loss_script, c(
+  "import sys, csv, torch",
+  "from libauc.losses import PairwiseAUCLoss",
+  "",
+  "surr_name = sys.argv[1]",
+  "csv_path  = sys.argv[2]",
+  "",
+  "surrogates = {",
+  '    "squared":       {"hparam": 1.0},',
+  '    "squared_hinge": {"hparam": 1.0},',
+  '    "hinge":         {"hparam": 1.0},',
+  '    "logistic":      {"hparam": 2.0},',
+  '    "barrier_hinge": {"hparam": (1.0, 2.0)},',
+  "}",
+  "",
+  "with open(csv_path) as f:",
+  "    reader = csv.reader(f)",
+  "    rows = list(reader)",
+  "",
+  "y_pred = torch.tensor([float(x) for x in rows[0]], dtype=torch.float32)",
+  "y_true = torch.tensor([float(x) for x in rows[1]], dtype=torch.float32)",
+  "",
+  "cfg = surrogates[surr_name]",
+  "loss_fn = PairwiseAUCLoss(surr_loss=surr_name, hparam=cfg['hparam'])",
+  "result = loss_fn(y_pred.view(-1, 1), y_true.view(-1, 1)).item()",
+  "print(f'{result:.15g}')"
+))
+```
+
+## R wrapper that calls the Python subprocess
+
+```{r}
+call_py_loss <- function(surr_name, y_pred_r, y_true_r) {
+  csv_path <- tempfile(fileext = ".csv")
+  writeLines(c(
+    paste(sprintf("%.15g", as.numeric(y_pred_r)), collapse = ","),
+    paste(as.integer(y_true_r), collapse = ",")
+  ), csv_path)
+  
+  # Call the isolated Python binary from reticulate environment
+  out <- system2(py_bin, c(py_loss_script, surr_name, csv_path),
+                 stdout = TRUE, stderr = TRUE)
+                 
+  # Ensure we capture Python errors properly if they happen
+  res <- suppressWarnings(as.numeric(out[length(out)]))
+  if (is.na(res)) stop("Python script failed: ", paste(out, collapse="\n"))
+  res
+}
 ```
 
 ## Sample Input Data
@@ -61,30 +158,6 @@ cat("Predictions:\n")
 print(y_pred_r)
 cat("Labels:\n")
 print(y_true_r)
-```
-
-
-## Python reference: libauc PairwiseAUCLoss
-
-We import the original Python implementation and define a helper
-function that computes the loss for a given surrogate.
-
-```{python}
-import torch
-from libauc.losses import PairwiseAUCLoss
-
-surrogates = {
-    "squared":       {"hparam": 1.0},
-    "squared_hinge": {"hparam": 1.0},
-    "hinge":         {"hparam": 1.0},
-    "logistic":      {"hparam": 2.0},
-    "barrier_hinge": {"hparam": (1.0, 2.0)},
-}
-
-def py_loss(surr_name, y_pred, y_true):
-    cfg = surrogates[surr_name]
-    loss_fn = PairwiseAUCLoss(surr_loss=surr_name, hparam=cfg["hparam"])
-    return loss_fn(y_pred.view(-1, 1), y_true.view(-1, 1)).item()
 ```
 
 ## R implementation
@@ -222,6 +295,7 @@ for (surr in surr_names) {
   bench <- atime::atime(
     N = n_seq,
     result = TRUE,
+    seconds.limit = 10,
     setup = {
       torch::torch_manual_seed(N)
       n_pos <- max(1L, as.integer(N * 0.3))
@@ -230,17 +304,12 @@ for (surr in surr_names) {
       y_true_r <- torch::torch_tensor(
         c(rep(1, n_pos), rep(0, n_neg)), dtype = torch::torch_float32()
       )
-      y_pred_np <- reticulate::r_to_py(as.numeric(y_pred_r))
-      y_true_np <- reticulate::r_to_py(as.numeric(y_true_r))
     },
     R = {
       r_loss(surr, y_pred_r, y_true_r)
     },
     Python = {
-      py_torch <- reticulate::import("torch")
-      py_pred <- py_torch$tensor(y_pred_np)
-      py_true <- py_torch$tensor(y_true_np)
-      py$py_loss(surr, py_pred, py_true)
+      call_py_loss(surr, y_pred_r, y_true_r)
     }
   )
   compare_dt <- data.table::dcast(

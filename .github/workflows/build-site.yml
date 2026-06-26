@@ -16,7 +16,9 @@ jobs:
 
       # System libs in case any R package source-compiles (e.g. fs -> libuv).
       - name: System dependencies
-        run: sudo apt-get update && sudo apt-get install -y libuv1-dev
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update && sudo apt-get install -y libuv1-dev
 
       # Pin a binary-covered R version so packages install as binaries (fast, reliable).
       - name: Setup R
@@ -28,8 +30,7 @@ jobs:
       - name: Setup Quarto
         uses: quarto-dev/quarto-actions/setup@v2
 
-      # Set up Python so reticulate can find it. Required on Ubuntu 24.04
-      # where system Python may not be on PATH by default.
+      # Set up Python so the blog can call Python torch via subprocess.
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
