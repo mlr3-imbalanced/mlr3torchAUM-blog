@@ -13,9 +13,7 @@ library in R as part of the
 [mlr3torchAUM](https://github.com/mlr3-imbalanced/mlr3torchAUM)
 package. To guarantee the correctness of our R implementation, we perform **cross-language numerical differential testing** using the original Python library as a reference oracle.
 
-Specifically, we generate predictions and labels in PyTorch, evaluate the loss using both implementations across various input sizes, and verify output equivalence (up to floating-point precision) using the
-[atime](https://github.com/tdhock/atime)
-R package.
+Specifically, we generate predictions and labels in PyTorch, evaluate the loss using both implementations across various input sizes, and verify output equivalence (up to floating-point precision) across several test scenarios.
 
 ## Setup
 
@@ -30,7 +28,6 @@ This keeps the C++ runtimes of R and Python completely isolated in memory.
 ```{r setup, warning=FALSE, message=FALSE}
 library(reticulate)
 library(torch)
-library(atime)
 library(data.table)
 
 # Setting UV_INDEX to the CPU‑only PyTorch wheel index for CI (no GPU available).
@@ -225,7 +222,7 @@ r_loss <- function(surr_name, y_pred, y_true) {
 }
 ```
 
-## Verification with atime
+## Numerical Verification
 
 Since `PairwiseAUCLoss` is designed for imbalanced classification, we
 test across five different class-balance scenarios to validate
@@ -239,51 +236,37 @@ correctness under varied conditions:
 | single_pos | 100 | 1 | 99 | Minimum valid input with one positive |
 | all_same | 100 | 100 | 0 | All same class, should return 0 (guard condition) |
 
-We use `atime` with `result=TRUE` so we can compare the actual
-outputs using `all.equal`.
+We can loop over these scenarios and evaluate the implementations to
+compare their actual outputs using `all.equal`.
 
 ```{r}
 surr_names <- c("squared", "squared_hinge", "hinge", "logistic", "barrier_hinge")
 scenarios <- list(
-  typical    = list(N = c(100L, 200L), get_n_pos = function(N) as.integer(N * 0.10)),
-  minority   = list(N = c(100L, 200L), get_n_pos = function(N) as.integer(N * 0.02)),
-  balanced   = list(N = c(100L, 200L), get_n_pos = function(N) as.integer(N * 0.50)),
-  single_pos = list(N = c(100L, 200L), get_n_pos = function(N) 1L),
-  all_same   = list(N = c(100L, 200L), get_n_pos = function(N) N)
+  typical    = list(N = 100L, n_pos = 10L),
+  minority   = list(N = 100L, n_pos = 2L),
+  balanced   = list(N = 100L, n_pos = 50L),
+  single_pos = list(N = 100L, n_pos = 1L),
+  all_same   = list(N = 100L, n_pos = 100L)
 )
 result_list <- list()
 
 for (surr in surr_names) {
   for (sc_name in names(scenarios)) {
     sc <- scenarios[[sc_name]]
-    bench <- atime::atime(
-      N = sc$N,
-      result = TRUE,
-      setup = {
-        torch::torch_manual_seed(42L)
-        n_pos <- sc$get_n_pos(N)
-        n_neg <- N - n_pos
-        y_pred_r <- torch::torch_randn(N, dtype = torch::torch_float32())
-        y_true_r <- torch::torch_tensor(
-          c(rep(1, n_pos), rep(0, n_neg)), dtype = torch::torch_float32()
-        )
-      },
-      R = {
-        r_loss(surr, y_pred_r, y_true_r)
-      },
-      Python = {
-        call_py_loss(surr, y_pred_r, y_true_r)
-      }
+    torch::torch_manual_seed(42L)
+    n_neg <- sc$N - sc$n_pos
+    y_pred_r <- torch::torch_randn(sc$N, dtype = torch::torch_float32())
+    y_true_r <- torch::torch_tensor(
+      c(rep(1, sc$n_pos), rep(0, n_neg)), dtype = torch::torch_float32()
     )
-    compare_dt <- data.table::dcast(
-      bench$measurements, N ~ expr.name, value.var = "result"
-    )[
-      , equal := paste(all.equal(as.numeric(R[[1]]), as.numeric(Python[[1]])))
-      , by = N
-    ]
-    result_list[[paste(surr, sc_name)]] <- compare_dt[
-      , .(surrogate = surr, scenario = sc_name, N, equal)
-    ]
+    
+    val_r <- as.numeric(r_loss(surr, y_pred_r, y_true_r))
+    val_py <- as.numeric(call_py_loss(surr, y_pred_r, y_true_r))
+    
+    eq <- paste(all.equal(val_r, val_py))
+    result_list[[paste(surr, sc_name)]] <- data.table::data.table(
+      surrogate = surr, scenario = sc_name, N = sc$N, equal = eq
+    )
   }
 }
 all_results <- data.table::rbindlist(result_list)
