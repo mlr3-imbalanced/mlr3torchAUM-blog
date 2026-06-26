@@ -28,7 +28,28 @@ jobs:
       - name: Setup Quarto
         uses: quarto-dev/quarto-actions/setup@v2
 
+      # Set up Python so reticulate can find it. Required on Ubuntu 24.04
+      # where system Python may not be on PATH by default.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      # Cache the heavy (~600MB) C++ backend for the R torch package
+      - name: Cache R LibTorch
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.torch
+          key: ${{ runner.os }}-libtorch-v1
+
+
       - name: Install R packages and render site
+        env:
+          # TORCH_INSTALL=1: Makes torch::install_torch() run non-interactively
+          TORCH_INSTALL: 1
+          # TORCH_HOME: Instructs R torch to install/find the C++ backend in the cached directory
+          TORCH_HOME: ${{ github.workspace }}/.torch
         run: Rscript render.R
 
       # Pull Request: draft preview + comment the link.
