@@ -49,7 +49,9 @@ jobs:
           TORCH_INSTALL: 1
           # TORCH_HOME: Instructs R torch to install/find the C++ backend in the cached directory
           TORCH_HOME: ${{ github.workspace }}/.torch
-        run: Rscript render.R
+        run: |
+          mkdir -p ${{ github.workspace }}/.torch
+          Rscript render.R
 
       # Pull Request: draft preview + comment the link.
       - name: Deploy preview + comment (PR)
