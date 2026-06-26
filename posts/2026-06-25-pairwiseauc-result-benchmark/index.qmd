@@ -1,0 +1,269 @@
+---
+title: "Cross-Language Numerical Equivalence Validation: Verifying the R Implementation of PairwiseAUCLoss against Python libauc"
+author: "Aman Kashyap"
+date: "2026-06-25"
+categories: [R, torch, benchmark, gsoc]
+---
+
+We implemented
+[PairwiseAUCLoss](https://github.com/Optimization-AI/LibAUC/blob/main/libauc/losses/auc.py#L855)
+from the Python
+[libauc](https://docs.libauc.org/api/libauc.losses.html#libauc.losses.auc.PairwiseAUCLoss)
+library in R as part of the
+[mlr3torchAUM](https://github.com/mlr3-imbalanced/mlr3torchAUM)
+package. To guarantee the correctness of our R implementation, we perform **cross-language numerical differential testing** using the original Python library as a reference oracle.
+
+Specifically, we generate predictions and labels in PyTorch, evaluate the loss using both implementations across various input sizes, and verify output equivalence (up to floating-point precision) using the
+[atime](https://github.com/tdhock/atime)
+R package.
+
+## Setup
+
+First, we load the necessary libraries. We use `reticulate` to install Python dependencies into an isolated virtual environment, and ensure the R `torch` Lantern backend is available.
+
+```{r setup, warning=FALSE, message=FALSE}
+library(reticulate)
+
+# Install Python dependencies into a self-contained virtual environment.
+# On GitHub Actions (Ubuntu), reticulate uses the system Python set up
+# by the `actions/setup-python` workflow step.
+if (!reticulate::py_module_available("libauc") || !reticulate::py_module_available("torch")) {
+  reticulate::py_install(c("torch", "libauc"))
+}
+
+# Install the R torch C++ backend (Lantern/LibTorch) if not yet downloaded.
+if (!torch::torch_is_installed()) {
+  torch::install_torch()
+}
+
+library(torch)
+library(atime)
+library(data.table)
+```
+
+## Sample Input Data
+
+Let's generate some sample predictions and labels to use for a quick demonstration:
+
+```{r}
+torch::torch_manual_seed(42L)
+N <- 10L
+n_pos <- 3L
+n_neg <- 7L
+
+y_pred_r <- torch::torch_randn(N, dtype = torch::torch_float32())
+y_true_r <- torch::torch_tensor(
+  c(rep(1, n_pos), rep(0, n_neg)), dtype = torch::torch_float32()
+)
+
+cat("Predictions:\n")
+print(y_pred_r)
+cat("Labels:\n")
+print(y_true_r)
+```
+
+
+## Python reference: libauc PairwiseAUCLoss
+
+We import the original Python implementation and define a helper
+function that computes the loss for a given surrogate.
+
+```{python}
+import torch
+from libauc.losses import PairwiseAUCLoss
+
+surrogates = {
+    "squared":       {"hparam": 1.0},
+    "squared_hinge": {"hparam": 1.0},
+    "hinge":         {"hparam": 1.0},
+    "logistic":      {"hparam": 2.0},
+    "barrier_hinge": {"hparam": (1.0, 2.0)},
+}
+
+def py_loss(surr_name, y_pred, y_true):
+    cfg = surrogates[surr_name]
+    loss_fn = PairwiseAUCLoss(surr_loss=surr_name, hparam=cfg["hparam"])
+    return loss_fn(y_pred.view(-1, 1), y_true.view(-1, 1)).item()
+```
+
+## R implementation
+
+Below is the R implementation of PairwiseAUCLoss from python libauc.
+
+```{r}
+surrogate_loss_names <- c(
+  "squared",
+  "squared_hinge",
+  "hinge",
+  "logistic",
+  "barrier_hinge"
+)
+
+squared_loss <- function(margin, t) {
+  (margin - t)^2
+}
+
+squared_hinge_loss <- function(margin, t) {
+  torch::torch_clamp(margin - t, min = 0)^2
+}
+
+hinge_loss <- function(margin, t) {
+  torch::torch_clamp(margin - t, min = 0)
+}
+
+logistic_loss <- function(scale, t) {
+  torch::nnf_softplus(-scale * t)
+}
+
+barrier_hinge_loss <- function(margin, scale, t) {
+  torch::torch_maximum(
+    -scale * (margin + t) + margin,
+    torch::torch_maximum(margin - t, scale * (t - margin))
+  )
+}
+
+get_surrogate_loss <- function(loss_name = "squared_hinge") {
+  switch(loss_name,
+    squared = squared_loss,
+    squared_hinge = squared_hinge_loss,
+    hinge = hinge_loss,
+    logistic = logistic_loss,
+    barrier_hinge = barrier_hinge_loss,
+    stop(sprintf(
+      "Unknown surrogate loss '%s'. Choose from: %s",
+      loss_name,
+      paste(surrogate_loss_names, collapse = ", ")
+    ), call. = FALSE)
+  )
+}
+
+nn_pairwise_auc_loss <- torch::nn_module(
+  c("PairwiseAUC","nn_loss"),
+  initialize = function(
+      surr_loss = "logistic",
+      margin = 1.0,
+      scale = 1.0) {
+    self$surr_loss_name <- surr_loss
+    self$margin <- margin
+    self$scale <- scale
+    self$surrogate <- get_surrogate_loss(surr_loss)
+    for (name in c("evals", "zeros", "all_one_class")) {
+      self$buffer(name)
+    }
+  },
+  buffer = function(name, value = torch::torch_tensor(0L)) {
+    self[[name]] <- torch::nn_buffer(value)
+  },
+  increment = function(name) {
+    self$buffer(name, self[[name]] + 1L)
+  },
+  forward = function(input, target) {
+    self$increment("evals")
+    if (torch::as_array((target[1] == target)$all())) {
+      self$increment("all_one_class")
+      self$increment("zeros")
+      return(torch::torch_sum(input * 0))
+    }
+    y_pred <- input$flatten()
+    y_true <- target$flatten()
+    pos_mask <- y_true == 1L
+    neg_mask <- y_true == 0L
+    f_ps <- y_pred[pos_mask]
+    f_ns <- y_pred[neg_mask]
+    t <- f_ps$unsqueeze(2) - f_ns$unsqueeze(1)
+    if (self$surr_loss_name == "barrier_hinge") {
+      loss <- self$surrogate(self$margin, self$scale, t)
+    } else if (self$surr_loss_name == "logistic") {
+      loss <- self$surrogate(self$scale, t)
+    } else {
+      loss <- self$surrogate(self$margin, t)
+    }
+    loss_val <- loss$mean()
+    if (torch::as_array(loss_val == 0)) {
+      self$increment("zeros")
+    }
+    loss_val
+  }
+)
+```
+
+Below is our R wrapper that calls `nn_pairwise_auc_loss` with the same
+hyperparameters used in the Python code above.
+
+```{r}
+r_loss <- function(surr_name, y_pred, y_true) {
+  hparams <- list(
+    squared       = list(margin = 1.0),
+    squared_hinge = list(margin = 1.0),
+    hinge         = list(margin = 1.0),
+    logistic      = list(scale = 2.0),
+    barrier_hinge = list(margin = 1.0, scale = 2.0)
+  )
+  args <- c(list(surr_loss = surr_name), hparams[[surr_name]])
+  loss_fn <- do.call(nn_pairwise_auc_loss, args)
+  as.numeric(loss_fn(y_pred, y_true)$item())
+}
+```
+
+## Verification with atime
+
+We use `atime` to compute both Python and R loss values across
+increasing data sizes, with `result=TRUE` so we can compare the actual
+outputs using `all.equal`.
+
+```{r}
+torch::torch_manual_seed(42L)
+surr_names <- c("squared", "squared_hinge", "hinge", "logistic", "barrier_hinge")
+n_seq <- as.integer(10^seq(1, 3, by = 0.5))
+result_list <- list()
+
+for (surr in surr_names) {
+  bench <- atime::atime(
+    N = n_seq,
+    result = TRUE,
+    setup = {
+      torch::torch_manual_seed(N)
+      n_pos <- max(1L, as.integer(N * 0.3))
+      n_neg <- N - n_pos
+      y_pred_r <- torch::torch_randn(N, dtype = torch::torch_float32())
+      y_true_r <- torch::torch_tensor(
+        c(rep(1, n_pos), rep(0, n_neg)), dtype = torch::torch_float32()
+      )
+      y_pred_np <- reticulate::r_to_py(as.numeric(y_pred_r))
+      y_true_np <- reticulate::r_to_py(as.numeric(y_true_r))
+    },
+    R = {
+      r_loss(surr, y_pred_r, y_true_r)
+    },
+    Python = {
+      py_torch <- reticulate::import("torch")
+      py_pred <- py_torch$tensor(y_pred_np)
+      py_true <- py_torch$tensor(y_true_np)
+      py$py_loss(surr, py_pred, py_true)
+    }
+  )
+  compare_dt <- data.table::dcast(
+    bench$measurements, N ~ expr.name, value.var = "result"
+  )[
+    , equal := paste(all.equal(as.numeric(R[[1]]), as.numeric(Python[[1]])))
+    , by = N
+  ]
+  result_list[[surr]] <- compare_dt[, .(surrogate = surr, N, equal)]
+}
+all_results <- data.table::rbindlist(result_list)
+print(all_results)
+```
+
+The table above shows `TRUE` for each (surrogate, N) pair where R and
+Python return the same value, or a small relative difference for large N
+(normal float32 rounding). This confirms our R implementation matches
+the original Python libauc.
+
+## Source code
+
+The full R implementation will be available in
+[pairwise_auc_loss.R](https://github.com/mlr3-imbalanced/mlr3torchAUM/blob/pairwise-auc-loss/R/pairwise_auc_loss.R).
+The Python reference is
+[libauc PairwiseAUCLoss](https://github.com/Optimization-AI/LibAUC/blob/main/libauc/losses/auc.py#L855)
+with
+[surrogate losses](https://github.com/Optimization-AI/LibAUC/blob/main/libauc/losses/surrogate.py).
