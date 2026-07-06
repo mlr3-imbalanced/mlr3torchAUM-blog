@@ -1,0 +1,577 @@
+---
+title: "A Git Rebase Workflow for Stacked Branches"
+author: "Wei Cao"
+date: "2026-07-06"
+categories: [Git]
+toc: true
+---
+
+# Motivation
+
+Let me share some Git workflow tips. Why do I need them? The fundamental reason
+is that *development is faster than review*, and sometimes I don't like staying on
+a single feature — I prefer working on several fronts concurrently. Maybe I get
+bored easily, and I also believe: **a rough start is a good start**. So, absent any
+special requirement, I like to *touch* every feature I plan to build. For developers
+who face the same situation as I do, I want to share some hands-on experience with
+Git workflows.
+
+# Background
+
+The worktree layout is:
+
+- `main → smote → smotenc`, and now I want to create `smotenc-plus` based on `smotenc`.
+- Another line: `main → smote → smoten`.
+
+`smote` supports sample generation for continuous features, `smoten` supports
+categorical features, and `smotenc` covers both.
+
+`smotenc` is in fact under active development, but to demonstrate the workflow we
+park the remaining work on `smotenc-plus`. The situation now: all the parts are
+written, and only one *assembly* function — the synthetic-sample generator — is
+missing. This time we need a function called `get_feature_wise_mode`. It is a helper
+that takes the mode (most frequent value) of a categorical variable, and it lives on
+the `smoten` branch, **not** on `smote`.
+
+We also need a small change: following imblearn's logic, the old behavior on a tie
+was to take a fixed, smallest feature — probably by the dictionary order of the
+feature name. Now the `smotenc` implementation additionally needs to support
+**random tie-breaking**, while keeping `smoten`'s "always take the smallest" logic
+unchanged. This is easy: add a parameter with a default value, so that `smoten`'s
+test code is untouched. As for *why* `smoten` and `smotenc` have this implementation
+difference — I think it may be that the imblearn developers were a bit careless and
+arbitrary. We won't worry about it for now; this post is only about demonstrating
+the Git workflow.
+
+Beyond the changes above, there is one major **structural** change:
+`get_feature_wise_mode` originally lives on the `smoten` branch, but `smotenc` needs
+it too. Both are child branches of `smote`, and their contents are invisible to each
+other. But `smotenc` — and its own child branch — also need this
+`get_feature_wise_mode`. So we want to **move it to the `smote` branch**, so that
+every branch built on top of it — `smoten`, `smotenc`, and the grandchild branch
+`smotenc-plus` — can all use it.
+
+::: {.callout-important}
+This point is important — remember it. It is the single biggest motivation for
+writing this post.
+:::
+
+# Using worktree; the current branch situation
+
+All branches are clean right now, with nothing uncommitted or unpushed, so we first
+create the `smotenc-plus` worktree based on `smotenc`. worktree is a great practice:
+it enables *truly parallel* development, which suits exactly this kind of
+"several branches open and worked on in parallel" situation — far more convenient
+than the stash-checkout-pop workflow.
+
+```bash
+git worktree add ../mlr3torchAUM-smotenc-plus -b smotenc-plus smotenc
+```
+
+This creates a sibling directory `mlr3torchAUM-smotenc-plus`; we enter that directory
+to develop. Suppose we make a new commit on this branch. The commit history now looks
+like:
+
+```
+f334ce7 (HEAD -> smotenc-plus, origin/smotenc-plus) delete the extra line
+bcf7993 (origin/smotenc, smotenc) finish smotenc_distances
+abe132c median_std function
+b156163 complete split_features ant unit tests
+52f31ac fix test
+6b8d7d7 (origin/smote, smote) add knn_from_distance for both smoten and smotenc
+7ae386b add guard for 0 query for knn_index and make_samples
+```
+
+The `smoten` branch (also present as a worktree in the sibling directory
+`../mlr3torchAUM-smoten`):
+
+```
+204785b (HEAD -> smoten, origin/smoten) delete knn_index since it has been in smote
+9e38281 doc
+3f62365 misc
+27ee6b5 complete SMOTEN class assembly
+b71ca97 complete knn_from_distance
+f05f087 complete sample_distances
+9bd2845 finish feature_value_distances
+8f3a03d finish make_samples_nominal
+dce8494 complete feature wise mode function
+6b8d7d7 (origin/smote, smote) add knn_from_distance for both smoten and smotenc
+7ae386b add guard for 0 query for knn_index and make_samples
+```
+
+The structure is quite clear. Drawn as a diagram, it is:
+
+```{mermaid}
+flowchart TD
+  b7["7ae386b"]:::smote --> b6["6b8d7d7 · add knn_from_distance<br/><b>smote</b>"]:::smote
+  b6 --> sn1["dce8494 · feature_wise_mode"]:::smoten
+  sn1 --> snd["⋯ 7 commits ⋯"]:::smoten
+  snd --> sn9["204785b · delete knn_index<br/><b>smoten</b>"]:::smoten
+  b6 --> nc1["52f31ac · fix test"]:::smotenc
+  nc1 --> nc2["b156163 · split_features"]:::smotenc
+  nc2 --> nc3["abe132c · median_std"]:::smotenc
+  nc3 --> nc4["bcf7993 · smotenc_distances<br/><b>smotenc</b>"]:::smotenc
+  nc4 --> p1["f334ce7 · delete extra line<br/><b>smotenc-plus</b>"]:::plus
+  classDef smote fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
+  classDef smoten fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  classDef smotenc fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+  classDef plus fill:#ede9fe,stroke:#7c3aed,color:#4c1d95,stroke-width:2px
+```
+
+**Terminology:**
+
+- **Grandparent node:** `smote`
+- **Child nodes:** `smoten`, `smotenc`
+- **Grandchild node:** `smotenc-plus` (it is only a child of `smotenc`, **not** of `smoten`)
+
+```{mermaid}
+flowchart TD
+  smote["smote<br/><i>grandparent</i>"]:::smote
+  smoten["smoten<br/><i>child</i>"]:::smoten
+  smotenc["smotenc<br/><i>child</i>"]:::smotenc
+  plus["smotenc-plus<br/><i>grandchild</i>"]:::plus
+  smote --> smoten
+  smote --> smotenc
+  smotenc --> plus
+  classDef smote fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
+  classDef smoten fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  classDef smotenc fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+  classDef plus fill:#ede9fe,stroke:#7c3aed,color:#4c1d95,stroke-width:2px
+```
+
+# Change #1: the grandparent node adds a function and tests
+
+Now we switch back to the `smote` branch, add some things, and commit and push. The
+state of each branch:
+
+**smote**
+
+```
+77fa4a7 (HEAD -> smote, origin/smote) add get_feature_wise_mode for both smoten and smotenc
+6b8d7d7 add knn_from_distance for both smoten and smotenc
+7ae386b add guard for 0 query for knn_index and make_samples
+```
+
+**smoten**
+
+```
+204785b (HEAD -> smoten, origin/smoten) delete knn_index since it has been in smote
+9e38281 doc
+3f62365 misc
+27ee6b5 complete SMOTEN class assembly
+b71ca97 complete knn_from_distance
+f05f087 complete sample_distances
+9bd2845 finish feature_value_distances
+8f3a03d finish make_samples_nominal
+dce8494 complete feature wise mode function
+6b8d7d7 add knn_from_distance for both smoten and smotenc
+```
+
+**smotenc**
+
+```
+bcf7993 (HEAD -> smotenc, origin/smotenc) finish smotenc_distances
+abe132c median_std function
+b156163 complete split_features ant unit tests
+52f31ac fix test
+6b8d7d7 add knn_from_distance for both smoten and smotenc
+```
+
+**smotenc-plus**
+
+```
+f334ce7 (HEAD -> smotenc-plus, origin/smotenc-plus) delete the extra line
+bcf7993 (origin/smotenc, smotenc) finish smotenc_distances
+abe132c median_std function
+b156163 complete split_features ant unit tests
+52f31ac fix test
+6b8d7d7 add knn_from_distance for both smoten and smotenc
+```
+
+**Conclusion:** the `smote` branch no longer appears in the commit histories of its
+original child branches — it has *secretly* forked away:
+
+```{mermaid}
+flowchart TD
+  b6["6b8d7d7"]:::smote --> new77["77fa4a7 · add get_feature_wise_mode<br/><b>smote (new tip)</b>"]:::smotehi
+  b6 --> snX["smoten<br/>(still branches from 6b8d7d7)"]:::smoten
+  b6 --> ncX["smotenc<br/>(still branches from 6b8d7d7)"]:::smotenc
+  ncX --> plusX["smotenc-plus"]:::plus
+  classDef smote fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
+  classDef smotehi fill:#bfdbfe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:3px
+  classDef smoten fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  classDef smotenc fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+  classDef plus fill:#ede9fe,stroke:#7c3aed,color:#4c1d95,stroke-width:2px
+```
+
+# Change #2: rebase `smoten` + retire the function and tests
+
+Switch to the `smoten` branch, and rebase onto `smote`:
+
+```bash
+git rebase smote
+git log --oneline
+```
+
+```
+ce57825 (HEAD -> smoten) delete knn_index since it has been in smote
+5e77ec1 doc
+5e607b8 misc
+400b9f8 complete SMOTEN class assembly
+0e23b0a complete knn_from_distance
+989c42a complete sample_distances
+b8adf61 finish feature_value_distances
+33d0d5c finish make_samples_nominal
+3462444 complete feature wise mode function
+77fa4a7 (origin/smote, smote) add get_feature_wise_mode for both smoten and smotenc
+6b8d7d7 add knn_from_distance for both smoten and smotenc
+```
+
+Before looking closely at this string of hashes, I noticed something odd in my
+terminal:
+
+```
+~/code/r/mlr3torchAUM-smoten smoten ⇣⇡
+```
+
+See those up and down arrows? They mean the branch is simultaneously *behind* and
+*ahead* of its remote! At this point I want to push, but it is rejected. What is
+going on?
+
+```
+❯ git push
+To github.com:mlr3-imbalanced/mlr3torchAUM.git
+ ! [rejected]        smoten -> smoten (non-fast-forward)
+error: failed to push some refs to 'github.com:mlr3-imbalanced/mlr3torchAUM.git'
+hint: Updates were rejected because the tip of your current branch is behind
+hint: its remote counterpart. If you want to integrate the remote changes,
+hint: use 'git pull' before pushing again.
+hint: See the 'Note about fast-forwards' in 'git push --help' for details.
+```
+
+Observing our commit hashes, we find:
+
+**Before rebase + the remote state:**
+
+```
+204785b (HEAD -> smoten, origin/smoten) delete knn_index since it has been in smote
+9e38281 doc
+3f62365 misc
+27ee6b5 complete SMOTEN class assembly
+b71ca97 complete knn_from_distance
+f05f087 complete sample_distances
+9bd2845 finish feature_value_distances
+8f3a03d finish make_samples_nominal
+dce8494 complete feature wise mode function
+6b8d7d7 add knn_from_distance for both smoten and smotenc
+```
+
+**After:**
+
+```
+ce57825 (HEAD -> smoten) delete knn_index since it has been in smote
+5e77ec1 doc
+5e607b8 misc
+400b9f8 complete SMOTEN class assembly
+0e23b0a complete knn_from_distance
+989c42a complete sample_distances
+b8adf61 finish feature_value_distances
+33d0d5c finish make_samples_nominal
+3462444 complete feature wise mode function
+77fa4a7 (origin/smote, smote) add get_feature_wise_mode for both smoten and smotenc
+6b8d7d7 add knn_from_distance for both smoten and smotenc
+```
+
+Every commit's hash *after* `complete feature wise mode function` has changed —
+even though the commit messages and contents are exactly the same!
+
+Drawn as a tree diagram:
+
+```{mermaid}
+flowchart TD
+  b6["6b8d7d7"]:::smote --> s77["77fa4a7 · get_feature_wise_mode<br/><b>smote</b>"]:::smote
+  s77 --> ln1["3462444 · feature wise mode"]:::smoten
+  ln1 --> lnd["⋯"]:::smoten
+  lnd --> ln9["ce57825 · delete knn_index<br/><b>local smoten (HEAD)</b>"]:::smoten
+  b6 --> on1["dce8494 · feature wise mode"]:::stale
+  on1 --> ond["⋯"]:::stale
+  ond --> on9["204785b · delete knn_index<br/><b>origin/smoten (old)</b>"]:::stale
+  classDef smote fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
+  classDef smoten fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  classDef stale fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px,stroke-dasharray:5 3
+```
+
+From `6b8d7d7`, the remote forks off here; but locally we took one more step,
+`77fa4a7`, which also shows that local and remote `smote` differ — and then it
+forks off, having nothing to do with the remote anymore!
+
+## Reading the reject message
+
+**1. What does fast-forward mean?** The simplest, linear case: the remote's tip is
+exactly an ancestor of the local tip — i.e. the most ordinary flow: you made some
+commits locally and push them to the remote. Smooth. Everybody is happy.
+
+**2. Should you `git pull`?** Never fall for the reject message's temptation! Let's
+analyze what happens. Recall the tree diagram (the post-rebase divergence from the
+previous section):
+
+```{mermaid}
+flowchart TD
+  B["6b8d7d7<br/>(common ancestor B)"]:::smote
+  B --> L["local smoten tip<br/>ce57825 (rebased, new)"]:::smoten
+  B --> R["origin/smoten tip<br/>204785b (old)"]:::stale
+  classDef smote fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
+  classDef smoten fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  classDef stale fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px,stroke-dasharray:5 3
+```
+
+`git pull` by default = `git fetch` + `git merge`: merge does **not** move, replace,
+or stack any old commit; it only **adds one "two-parent" connecting node** that joins
+the two lines — each grown independently from B — together at the top.
+
+In fact, I never use merge; personally I only ever rebase. I want a linear commit
+history.
+
+That batch of work would then appear **twice** in the history (and, most likely,
+conflict all the way through, because the same changes exist on both sides).
+**Disaster!**
+
+```{mermaid}
+flowchart TD
+  B["6b8d7d7 (B)"]:::smote
+  B --> l1["77fa4a7 → 3462444 ⋯ ce57825<br/>local rebased (new hashes)"]:::smoten
+  B --> r1["dce8494 ⋯ 204785b<br/>origin/smoten (old hashes)"]:::stale
+  l1 --> M["MERGE commit<br/>(two parents · work appears twice)"]:::merge
+  r1 --> M
+  classDef smote fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
+  classDef smoten fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  classDef stale fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px,stroke-dasharray:5 3
+  classDef merge fill:#fef9c3,stroke:#ca8a04,color:#713f12,stroke-width:3px
+```
+
+**3. `git push -f` — this is the correct posture.** It forcibly rewrites the remote
+history to match the local one.
+
+`-f` is short for `--force`. There is also `--force-with-lease`, which is safer and
+suits the case where multiple people work on the current branch. I haven't run into
+that case, so I won't go into it much — I'll cover it when I do. But
+`--force-with-lease` also fits our situation, so the conclusion is: no matter what,
+just mindlessly use `--force-with-lease`.
+
+After the operation:
+
+```
+ce57825 (HEAD -> smoten, origin/smoten) delete knn_index since it has been in smote
+5e77ec1 doc
+5e607b8 misc
+400b9f8 complete SMOTEN class assembly
+0e23b0a complete knn_from_distance
+989c42a complete sample_distances
+b8adf61 finish feature_value_distances
+33d0d5c finish make_samples_nominal
+3462444 complete feature wise mode function
+77fa4a7 (origin/smote, smote) add get_feature_wise_mode for both smoten and smotenc
+```
+
+Remote and local are forcibly aligned. We then safely retire this branch's
+`get_feature_wise_mode` function; the tests still pass, because we have already
+rebased onto the parent branch `smote`'s "all-in-one" `get_feature_wise_mode`.
+
+# Change #3: `smotenc` also rebases the latest `smote`
+
+Same method as before. So far so good.
+
+`smotenc`'s commit history:
+
+```
+f58926c (HEAD -> smotenc, origin/smotenc) finish smotenc_distances
+9777c08 median_std function
+60aa283 complete split_features ant unit tests
+749d92f fix test
+77fa4a7 (origin/smote, smote) add get_feature_wise_mode for both smoten and smotenc
+6b8d7d7 add knn_from_distance for both smoten and smotenc
+```
+
+Compared with the history before rebase:
+
+```
+bcf7993 (HEAD -> smotenc, origin/smotenc) finish smotenc_distances
+abe132c median_std function
+b156163 complete split_features ant unit tests
+52f31ac fix test
+6b8d7d7 add knn_from_distance for both smoten and smotenc
+```
+
+```{mermaid}
+flowchart TD
+  b6["6b8d7d7"]:::smote --> s77["77fa4a7 · get_feature_wise_mode<br/><b>smote</b>"]:::smote
+  s77 --> nnew["749d92f ⋯ f58926c<br/><b>local smotenc (rebased, new)</b>"]:::smotenc
+  b6 --> nold["52f31ac ⋯ bcf7993<br/><b>origin/smotenc (old)</b>"]:::stale
+  classDef smote fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
+  classDef smotenc fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+  classDef stale fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px,stroke-dasharray:5 3
+```
+
+# Change #4: `smotenc-plus` rebases `smotenc`
+
+Now it's the grandchild branch `smotenc-plus`'s turn — it needs to rebase `smotenc`.
+Its current commit history:
+
+```
+f334ce7 (HEAD -> smotenc-plus, origin/smotenc-plus) delete the extra line
+bcf7993 finish smotenc_distances
+abe132c median_std function
+b156163 complete split_features ant unit tests
+52f31ac fix test
+6b8d7d7 add knn_from_distance for both smoten and smotenc
+```
+
+You may already have spotted the problem — the answer is that we should use
+`rebase --onto`:
+
+```{mermaid}
+flowchart TD
+  S["S (6b8d7d7)"]:::smote --> X["X · get_feature_wise_mode (77fa4a7)<br/><b>smote</b>"]:::smote
+  X --> ncnew["nc1' → nc2' → nc3' → nc4'<br/>749d92f ⋯ f58926c · <b>smotenc (new)</b>"]:::smotenc
+  S --> onc["nc1 → nc2 → nc3 → nc4<br/>52f31ac ⋯ bcf7993 (old)"]:::stale
+  onc --> p1["p1 · f334ce7 (delete the extra line)<br/><b>smotenc-plus</b>"]:::plus
+  classDef smote fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
+  classDef smotenc fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+  classDef stale fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px,stroke-dasharray:5 3
+  classDef plus fill:#ede9fe,stroke:#7c3aed,color:#4c1d95,stroke-width:2px
+```
+
+`--onto` lets you manually specify "from where to start replaying":
+
+```bash
+git rebase --onto smotenc  bcf7993  smotenc-plus
+```
+
+The full meaning of this command: we are currently working on `smotenc-plus`, and we
+want to rebase onto `smotenc`'s latest tip; commit `bcf7993` and everything before it
+on `smotenc-plus` — we don't care about those; we simply **replay the commits after
+`bcf7993`** onto `smotenc`'s current latest tip.
+
+What is `bcf7993`? It means: on the current `smotenc-plus`, `bcf7993` and the commits
+before it are the ones we don't care about; we only look at what comes after it —
+namely `f334ce7 delete the extra line` — which is the commit *unique* to
+`smotenc-plus`.
+
+This is the result we want: place `p1` on top of the new `smotenc`:
+
+```{mermaid}
+flowchart TD
+  S["S"]:::smote --> X["X (77fa4a7)<br/><b>smote</b>"]:::smote
+  X --> ncnew["nc1' → nc2' → nc3' → nc4'<br/>f58926c · <b>smotenc (new)</b>"]:::smotenc
+  ncnew --> p1new["p1' · f74ab50 (delete the extra line)<br/><b>smotenc-plus</b>"]:::plus
+  classDef smote fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
+  classDef smotenc fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+  classDef plus fill:#ede9fe,stroke:#7c3aed,color:#4c1d95,stroke-width:2px
+```
+
+Exactly the result we want.
+
+## What modern Git does for us automatically
+
+But let's actually try a direct rebase (without `--onto`):
+
+```
+~/code/r/mlr3torchAUM-smotenc-plus smotenc-plus
+❯ git rebase smotenc
+warning: skipped previously applied commit 52f31ac
+warning: skipped previously applied commit b156163
+warning: skipped previously applied commit abe132c
+warning: skipped previously applied commit bcf7993
+hint: use --reapply-cherry-picks to include skipped commits
+hint: Disable this message with "git config set advice.skippedCherryPicks false"
+Successfully rebased and updated refs/heads/smotenc-plus.
+```
+
+The result is fine — exactly what we want:
+
+```
+f74ab50 (HEAD -> smotenc-plus) delete the extra line
+f58926c (origin/smotenc, smotenc) finish smotenc_distances
+9777c08 median_std function
+60aa283 complete split_features ant unit tests
+749d92f fix test
+77fa4a7 (origin/smote, smote) add get_feature_wise_mode for both smoten and smotenc
+6b8d7d7 add knn_from_distance for both smoten and smotenc
+```
+
+What is going on? Those warning messages deserve attention. The skipped commits
+correspond to the four commits before our commit:
+
+```
+bcf7993 finish smotenc_distances
+abe132c median_std function
+b156163 complete split_features ant unit tests
+52f31ac fix test
+```
+
+They are the hashes committed by the parent branch `smotenc` *before* its rebase.
+Once `smotenc` rebased onto `smote`, they became obsolete.
+
+Modern Git has **automatic cherry-pick detection**: before replaying, it computes a
+**patch-id** (a difference fingerprint) for each commit. It finds that the old commits
+you are carrying:
+
+```
+bcf7993 finish smotenc_distances
+abe132c median_std function
+b156163 complete split_features ant unit tests
+52f31ac fix test
+```
+
+have difference fingerprints **exactly identical** to those in the new `smotenc`:
+
+```
+f58926c (HEAD -> smotenc, origin/smotenc) finish smotenc_distances
+9777c08 median_std function
+60aa283 complete split_features ant unit tests
+749d92f fix test
+```
+
+(even the commit messages are the same) → it judges "**these have already been
+applied**" → **skips them automatically**, and replays only the genuinely new commit
+that is truly unique to `smotenc-plus`:
+
+```
+f74ab50  delete the extra line
+```
+
+The source code for this is here:
+<https://github.com/git/git/commit/767a4ca648f8791c1fb623bd9f79fd8d7f026499>
+
+::: {.callout-warning}
+So it is *conditional* — a smart Git feature. In general, **do not rely on it**;
+mastering your Git history and using `--onto` for precise operations is the right
+way.
+
+And a final warning: do not fall for its temptation to use
+`--reapply-cherry-picks` to include skipped commits — that replays the same content
+again and creates a whole pile of conflicts!
+:::
+
+# Bonus: why does the same commit's hash change after a rebase?
+
+In one sentence: **because its parent node changed. This is guaranteed.**
+
+Some other things change too, such as the timestamp, the committer, and so on. A
+commit's hash is derived by combining all of the above information.
+
+By contrast, the **patch-id** mentioned earlier is computed *only* over the
+difference in the committed file contents (`git diff`). That is why, earlier, when we
+rebased the grandchild branch `smotenc-plus` onto `smotenc` *without* specifying
+`--onto`, Git could recognize that these commits had already been applied and skip
+them automatically.
+
+# Summary
+
+::: {.callout-tip}
+- Don't use `git pull` / `git merge`; use `git rebase`.
+- `git rebase` changes the commit history.
+- You need to use `git push -f` and `git push --force-with-lease`.
+- `git rebase --onto` solves the rebase problem for grandchild branches — and modern
+  Git will, conditionally and intelligently, do this work for us.
+:::
