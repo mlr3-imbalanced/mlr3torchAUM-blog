@@ -1,0 +1,77 @@
+---
+title: "[1/4] Float32 Overflow and Underflow for Softmax Losses"
+author: "Wei Cao"
+date: "2026-06-25"
+categories: [R, torch, numerical-stability]
+description: "Part 1 of a four-part series on numerical stability for softmax-based losses."
+execute:
+  echo: true
+  warning: true
+  error: true
+---
+
+This is the first post in a four-part series about numerical stability in loss functions that involve softmax. The series starts with float32 overflow and underflow, then studies naive Cross Entropy, then Hellinger-distance losses, and finally discusses solution patterns and training-dynamics questions.
+
+## Series Goal
+
+The goal of this series is to discuss numerical-stability issues in the forward and backward propagation of several loss functions that involve softmax, and to try to propose some solutions.
+In particular, the losses discussed here are Cross Entropy and a Hellinger-distance loss.
+
+Anti-goal:
+the architecture of the classifier neural network itself. That is outside the scope of this series.
+
+Goal for future posts:
+for the numerical-stability solutions proposed in this post, run empirical analyses on multiple datasets and at multiple scales. It is possible that more elegant new solutions will be born in that process.
+Following the final question raised at the end of this post, future posts will also explore the training dynamics of loss functions. That analysis will also be combined with empirical results. Stay tuned.
+
+## Goal of This Post
+
+The goal of this post is to establish the float32 facts that will be used throughout the rest of the series: where overflow happens, where underflow happens, and why these limits matter before we analyze softmax-based losses. The next post uses this background to inspect naive Cross Entropy and fused `log_softmax`.
+
+## 1. Overflow and Underflow: What We Need to Know About Float32
+
+Float32 is the data type we commonly use for training machine-learning models, and it is also the default data type for torch tensors.
+From its construction, we can answer the following questions. I omit the calculation process here; if needed, I can write a separate post about it in the future.
+
+1. What is the largest representable number? $2^{128} - 2^{104}$, approximately $3.40 \times 10^{38}$. Slightly larger than this, and so on below.
+2. What is the smallest positive normal number? $2^{-126}$, approximately $1.17 \times 10^{-38}$.
+3. What is the smallest positive subnormal number? $2^{-149}$, approximately $1.40 \times 10^{-45}$.
+4. What is the spacing between two neighboring float32 numbers near 1? $2^{-23}$, approximately $1.19 \times 10^{-7}$.
+5. What is the spacing between neighboring float32 numbers around any given number? $2^{e-23}$. For example, near $2^{23}$ (8,388,608), the spacing between neighboring numbers is 1.
+
+```{r}
+library(torch)
+big <- torch_tensor(3.40e38, dtype=torch_float32())
+bigger <- torch_tensor(3.41e38, dtype=torch_float32())
+cat("big enough: ", as.numeric(big), "\n") # 3.4e38
+cat("bigger than big: ", as.numeric(bigger), "\n") # Inf
+
+small <- torch_tensor(1.41e-45, dtype=torch_float32())
+smaller <- torch_tensor(1.40e-45, dtype=torch_float32()) # surprisingly displayed the same as small above
+really_small <- torch_tensor(0.70e-45, dtype=torch_float32()) # done for; rounded to zero
+cat("small enough: ", as.numeric(small), "\n")
+cat("smaller than small: ", as.numeric(smaller), "\n")
+cat("really small: ", as.numeric(really_small), "\n")
+
+one_delta <- torch_tensor(1 + 1.19e-7, dtype=torch_float32())
+one_delta_plus <- torch_tensor(1 + 6e-7, dtype=torch_float32())
+cat("one + delta: ", as.numeric(one_delta), "\n") # still 1
+cat("one + delta plus: ", as.numeric(one_delta_plus), "\n") # 1.000001 = 1 + e-6
+
+number <- torch_tensor(2^23, dtype=torch_float32())
+number_delta05 <- torch_tensor(2^23+0.5, dtype=torch_float32())
+number_delta1 <- torch_tensor(2^23+1, dtype=torch_float32())
+cat("number: ", as.numeric(number), "\n") # 8388608
+cat("number + delta 0.5: ", as.numeric(number_delta05), "\n") # 8388608
+cat("number + delta 1: ", as.numeric(number_delta1), "\n") # 8388609
+```
+All of this is only to give the reader an intuition: at some point, float32 gives up on very large numbers or numbers that get infinitely close to 0, surrendering them as `Inf` or `0`.
+Also, the larger a number is, the less precise float32 becomes, and the spacing between neighboring float32 values becomes larger.
+
+## Conclusions
+
+- Float32 can overflow to `Inf` for very large values and underflow to `0` for values that get too close to zero.
+- The spacing between representable float32 numbers grows as the magnitude of the number grows.
+- These facts will be used in the next post to analyze the forward and backward stability of softmax Cross Entropy.
+
+Next in this series: [Why Naive Softmax Cross Entropy Produces NaN Gradients](../2026-06-25-cross-entropy-softmax-stability/).
