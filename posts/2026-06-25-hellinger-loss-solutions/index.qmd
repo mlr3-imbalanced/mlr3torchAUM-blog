@@ -191,7 +191,7 @@ How should we understand this key piece of code?
 The `scatter` operation with `dim = 2` tells the sniper rifle: fire along the column, i.e. class, dimension.
 `index = targets$unsqueeze(2)` says where the bullet should hit.
 `src = 0.5 * sqrt_p_t` says what powder is inside the bullet:
-put $(batch_num, 1)$-shaped $\frac{1}{2}\sqrt{p_t}$ into it.
+put $(batch\_num, 1)$-shaped $\frac{1}{2}\sqrt{p_t}$ into it.
 
 Written!
 
