@@ -1,0 +1,859 @@
+---
+title: "Group-Aware Splitting for Imbalanced Data"
+description: "Extending Toby Hocking's exact-downsampling function to grouped data, and what the Laribi2024 dataset does to it in practice."
+author: "Wei Cao"
+date: "2026-09-07"
+categories: [R, data.table, imbalanced-data]
+fig-width: 10
+fig-height: 6
+fig-dpi: 100
+execute:
+  echo: true
+  warning: true
+  error: true
+---
+
+```{r}
+#| include: false
+options(width = 120)
+```
+
+The goal of this post is to extend an application scenario of Toby Hocking's [More precise imbalanced data generation](https://tdhock.github.io/blog/2026/exact-downsampling/) -- namely, to support splitting an imbalanced dataset **that has groups**, without leaking data across the split.
+
+1. First we briefly introduce our data-splitting requirements, and read through the key function of Toby's original post, `compute_target_counts`, against those requirements.
+2. Then we state our new requirement -- how to split a dataset with groups so as to prevent data leakage -- and its solution.
+3. Finally we go back to a real dataset and investigate how its actual group structure, and the sampling scheme, affect the imbalanced split.
+
+Buckle up!
+
+## 1. Requirements and constraints, and the `compute_target_counts` function
+
+### 1.1 Requirements and constraints
+
+We have a dataset, and we want to split it -- according to the label -- into a balanced subset and an imbalanced subset, so that we can train on the balanced subset and test on the imbalanced one, and then train on the imbalanced subset and test on the balanced one.
+
+So our function signature is `compute_target_counts(p_neg, total_pos, total_neg)`, where `total_pos` and `total_neg` are the total number of positive and negative samples in the whole dataset, and `p_neg` is the fraction of negatives in the imbalanced subset. `p_neg` may be greater than 0.5 (in which case positives are the minority class), or less than 0.5 (in which case negatives are the minority class).
+
+What should it return? We need a concrete sampling plan: how many positive samples (`imb_pos`) and how many negative samples (`imb_neg`) to draw for the imbalanced subset; how many positive (`bal_pos`) and negative (`bal_neg`) samples to draw for the balanced subset.
+
+This carries a first constraint implicitly: no single sample can be in both the imbalanced subset and the balanced subset, because in essence these are a train/test split, and we must guard against data leakage.
+
+The second constraint is that the positive-sample counts of the two subsets must sum to no more than the total number of positive samples in the dataset (likewise for negatives) -- because oversampling has not yet entered the picture, so no sample is created out of thin air.
+
+The third constraint is that the balanced subset and the imbalanced subset must have the same size.
+
+### 1.2 Anatomy of `compute_target_counts`
+
+First, let's admire the function:
+
+```{r}
+library(data.table)
+
+compute_target_counts <- function(p_neg, Tpos, Tneg){
+  p_small <- ifelse(p_neg<0.5, p_neg, 1-p_neg)
+  n_small = as.integer(pmin(
+    2*Tpos*p_small/(3*(1-p_neg)+p_neg),
+    2*Tneg*p_small/(1+2*p_neg)
+  ))
+  data.table(p_neg)[, let(
+    n_pos = ifelse(
+      p_neg<0.5,
+      n_small*(1-p_neg)/p_neg,
+      n_small),
+    n_neg = ifelse(
+      p_neg<0.5,
+      n_small,
+      n_small*p_neg/(1-p_neg))
+  )][
+  , n_imb := n_pos+n_neg
+  ][
+  , N_pos := n_imb/2
+  ][
+  , N_neg := n_imb-N_pos
+  ][, let(
+    pos=n_pos+N_pos,
+    neg=n_neg+N_neg
+  )][
+  , check_prop := n_neg/n_imb
+  ][]
+}
+compute_target_counts(c(0.1, 0.5, 0.9), Tpos = 1000, Tneg = 1000)
+```
+
+We can see above that the function returns, for each requested `p_neg`, the full sampling plan: `n_pos`/`n_neg` for the imbalanced subset, `N_pos`/`N_neg` for the balanced subset, and a `check_prop` column to verify the imbalanced subset's negative fraction matches `p_neg`.
+
+The key to understanding the whole function is:
+
+```r
+  n_small = as.integer(pmin(
+    2*Tpos*p_small/(3*(1-p_neg)+p_neg),
+    2*Tneg*p_small/(1+2*p_neg)
+  ))
+```
+
+and it cannot be understood apart from the constraints stated above.
+
+To turn the constraints into formulas, recall the variables set up earlier: `imb_pos`, `imb_neg` are the positive/negative counts of the imbalanced subset; `bal_pos`, `bal_neg` are the positive/negative counts of the balanced subset.
+
+Let me spell out the constraints like a grade-schooler:
+
+```
+imb_neg / (imb_pos + imb_neg) = p_neg
+bal_pos / (bal_pos + bal_neg) = 1/2
+imb_pos + imb_neg = bal_pos + bal_neg           (constraint 3)
+
+imb_pos + bal_pos <= total_pos                  (constraint 2)
+imb_neg + bal_neg <= total_neg                  (constraint 2)
+```
+
+Let `n_subset` denote `imb_pos + imb_neg` (which, by constraint 3, is also `bal_pos + bal_neg`). Then:
+
+```
+imb_neg = n_subset * p_neg;  imb_pos = n_subset - imb_neg
+bal_pos = 0.5 * n_subset;    bal_neg = n_subset - bal_pos
+```
+
+and the two inequalities of constraint 2 become:
+
+```
+n_subset - n_subset * p_neg + 0.5 * n_subset <= total_pos
+n_subset * p_neg + n_subset - 0.5 * n_subset <= total_neg
+```
+
+So, even though we defined that many variables, only one of them truly has a degree of freedom -- `n_subset` -- and its value is bounded by the two inequalities above. Simple algebra gives:
+
+```
+n_subset <= total_pos / (1.5 - p_neg)
+n_subset <= total_neg / (p_neg + 0.5)
+```
+
+i.e. `n_subset <= min(total_neg / (p_neg + 0.5), total_pos / (1.5 - p_neg))`.
+
+Once this single degree of freedom is fixed, every other quantity we need falls out naturally: `imb_pos`, `imb_neg` (the imbalanced subset's positive/negative counts) and `bal_pos`, `bal_neg` (the balanced subset's positive/negative counts).
+
+Getting rid of the fractions is exactly where
+
+```r
+  n_small = as.integer(pmin(
+    2*Tpos*p_small/(3*(1-p_neg)+p_neg),
+    2*Tneg*p_small/(1+2*p_neg)
+  ))
+```
+
+-- the heart of Toby's function -- comes from; it's just that Toby's code multiplies `n_subset` by `p_small` directly, to compute the minority-class count in one step.
+
+## 2. New requirement: splitting data with groups
+
+Now imagine a dataset where each row is one hospital visit for a patient, and each patient may have one or more visits. We now require that all of a given patient's records go entirely into the imbalanced subset, entirely into the balanced subset, or are dropped entirely -- never split across the two. Same-group data has a kind of "atomicity".
+
+Why? Because if one patient's records ended up in both subsets at once, and those subsets were later used as train and test sets respectively, we would say the training set has "peeked" at some information about a patient present in the test set -- a textbook case of data leakage.
+
+This introduces a new constraint. What exactly is it?
+
+Since same-group data has this "atomicity", the natural approach is: first assign each whole group to a subset -- balanced or imbalanced -- and only then plan the sampling at the individual-record level.
+
+Suppose we have already finished assigning groups to subsets. The imbalanced subset contains `imb_grp_num` groups' worth of data, and the balanced subset contains `bal_grp_num` groups' worth of data.
+
+`imb_pool_total`, the total size of the imbalanced subset's sampling pool, equals the sum, over every group `gi` assigned to the imbalanced subset, of the number of samples in `gi`. It breaks down into `imb_pool_pos` positive samples and `imb_pool_neg` negative samples.
+
+`bal_pool_total`, the total size of the balanced subset's sampling pool, equals the sum, over every group `gi` assigned to the balanced subset, of the number of samples in `gi`. It breaks down into `bal_pool_pos` positive samples and `bal_pool_neg` negative samples.
+
+Setting up `n_subset` again as the single free variable, the constraints become:
+
+```
+n_subset - n_subset * p_neg <= imb_pool_pos
+n_subset * p_neg             <= imb_pool_neg
+n_subset * 0.5                <= bal_pool_pos
+n_subset - n_subset * 0.5    <= bal_pool_neg
+```
+
+i.e.
+
+```
+n_subset = min(imb_pool_pos / (1 - p_neg), imb_pool_neg / p_neg,
+                bal_pool_pos / 0.5,          bal_pool_neg / 0.5)
+```
+
+Again, once this single degree of freedom is fixed, everything else follows: `imb_pos`, `imb_neg`, `bal_pos`, `bal_neg`.
+
+The original `compute_target_counts` signature can no longer satisfy us. To reuse it while staying backward compatible, we make this change:
+
+```{r}
+compute_target_counts_v2 <- function(p_neg, Tpos, Tneg, with_group = FALSE,
+                                     imb_pool_pos = NULL, imb_pool_neg = NULL,
+                                     bal_pool_pos = NULL, bal_pool_neg = NULL) {
+  if (with_group) {
+    pools <- list(
+      imb_pool_pos = imb_pool_pos, imb_pool_neg = imb_pool_neg,
+      bal_pool_pos = bal_pool_pos, bal_pool_neg = bal_pool_neg
+    )
+    miss <- names(pools)[vapply(pools, is.null, logical(1))]
+    if (length(miss)) {
+      stop("with_group = TRUE requires: ", paste(miss, collapse = ", "))
+    }
+    n_subset <- as.integer(pmin(imb_pool_pos / (1 - p_neg), imb_pool_neg / p_neg, bal_pool_pos / 0.5, bal_pool_neg / 0.5))
+    .n_neg = as.integer(n_subset * p_neg)
+    dt <- data.table(p_neg)[, `:=`(
+      n_pos = n_subset - .n_neg,
+      n_neg = .n_neg
+    )]
+  } else {
+    p_small <- ifelse(p_neg < 0.5, p_neg, 1 - p_neg)
+    n_small <- as.integer(pmin(
+      2 * Tpos * p_small / (3 * (1 - p_neg) + p_neg),
+      2 * Tneg * p_small / (1 + 2 * p_neg)
+    ))
+    dt <- data.table(p_neg)[, `:=`(
+      n_pos = ifelse(p_neg < 0.5, round(n_small * (1 - p_neg) / p_neg), n_small),
+      n_neg = ifelse(p_neg < 0.5, n_small, round(n_small * p_neg / (1 - p_neg)))
+    )]
+  }
+  dt[, n_imb := n_pos + n_neg][, N_pos := n_imb %/% 2L][, N_neg := n_imb - N_pos][, `:=`(pos = n_pos + N_pos, neg = n_neg + N_neg)][, check_prop := n_neg / n_imb][]
+}
+
+## with_group = FALSE reproduces compute_target_counts exactly
+compute_target_counts_v2(c(0.1, 0.5, 0.9), Tpos = 1000, Tneg = 1000)
+
+## with_group = TRUE takes the four pool sizes directly
+compute_target_counts_v2(0.99, with_group = TRUE,
+                          imb_pool_pos = 3, imb_pool_neg = 12,
+                          bal_pool_pos = 3, bal_pool_neg = 12)
+```
+
+We can see above that when `with_group = FALSE`, the new function reproduces the old one exactly, and when `with_group = TRUE` it takes the four pool sizes directly and returns the same kind of sampling plan.
+
+## 3. Group composition and its effect on sampling
+
+Looking back at our new function: in the grouped case, since we are handed the four pool quotas explicitly, the code is actually clearer to write. The question is: how do we compute those four pools from a dataset's group structure? Do different sampling schemes produce pools of different sizes? The answer is yes. That's abstract, so let's work through a toy example first, and then dissect the real Laribi2024 dataset.
+
+### 3.1 A toy example
+
+There are four groups.
+
+- The first group has 10 samples: the first 8 are negatives, the last 2 are positives.
+- The second group has only 1 positive sample.
+- The third group has only 1 negative sample.
+- The fourth group has 3 negative samples.
+
+Following the analysis above, we first need to assign each group a "label": should all of its samples belong to the "imbalanced subset" or the "balanced subset"? With 4 groups there are `2^4 = 16` possible assignments.
+
+Across these 16 assignments, what happens to the key quadruple `(imb_pool_pos, imb_pool_neg, bal_pool_pos, bal_pool_neg)` that determines our sampling pool sizes?
+
+Consider the simplest case: all four groups fall into the "balanced" subset. Then:
+
+```
+imb_pool_pos = imb_pool_neg = 0
+bal_pool_pos = total_pos = 2 + 1 + 0 + 0 = 3
+bal_pool_neg = total_neg = 8 + 0 + 1 + 3 = 12
+```
+
+This clearly does not meet our needs. Looking at the formula again:
+
+```
+n_subset = min(imb_pool_pos / (1 - p_neg), imb_pool_neg / p_neg, bal_pool_pos / 0.5, bal_pool_neg / 0.5)
+```
+
+any zero in the quadruple `(imb_pool_pos, imb_pool_neg, bal_pool_pos, bal_pool_neg)` forces `n_subset` to 0. So assigning each group a "balanced/imbalanced" label costs us some degrees of freedom.
+
+How much do we lose? This toy example is small enough that I just enumerated all 16 assignments (`I` = assigned to "imbalanced", `B` = assigned to "balanced"; the position corresponds to `g1..g4`):
+
+```{r}
+splits <- data.table(
+  mask     = c("BBBB","IBBB","BIBB","IIBB","BBIB","IBIB","BIIB","IIIB",
+               "BBBI","IBBI","BIBI","IIBI","BBII","IBII","BIII","IIII"),
+  imb_pos  = c(0,2,1,3,0,2,1,3,0,2,1,3,0,2,1,3),
+  imb_neg  = c(0,8,0,8,1,9,1,9,3,11,3,11,4,12,4,12),
+  bal_pos  = c(3,1,2,0,3,1,2,0,3,1,2,0,3,1,2,0),
+  bal_neg  = c(12,4,12,4,11,3,11,3,9,1,9,1,8,0,8,0)
+)
+splits[, ok := imb_pos > 0 & imb_neg > 0 & bal_pos > 0 & bal_neg > 0]
+splits
+splits[, sum(ok)]
+```
+
+We can see above that only 6 out of the 16 assignments are feasible -- 37.5%. Ten out of sixteen are dead on arrival -- that is exactly the "lost degrees of freedom" made concrete.
+
+### 3.2 What does it take for a handful of groups to support a subset?
+
+So this act of "assigning each group a balanced/imbalanced label" carries one basic requirement: both the "balanced" subset and the "imbalanced" subset must contain both positive and negative samples at once.
+
+Rather than jumping straight to "how do we assign step by step", let's ask a smaller question first: what kind of minimal handful of groups, once assigned to a subset, guarantees that subset has both positive and negative samples?
+
+I believe there are only two kinds:
+
+- Suppose some group has both positive and negative samples -- call it a "mixed platter". If we assign it to the "balanced" subset, the balanced subset is guaranteed to have both.
+- Suppose some group has only negative samples. If we assign it to the "imbalanced" subset, the manager in charge of building the imbalanced subset keeps an alarm going in their head: "my subset needs a positive sample!" Either give me another purely-positive group to pair with it, or give me a "mixed platter", and only then can the alarm be silenced.
+
+So there are exactly two kinds of minimal qualifying unit. Let's call it a **seed**:
+
+```
+seed = 1 mixed group,  or  1 pair of (a pure-positive group, a pure-negative group)
+```
+
+A lone pure-positive group, or a lone pure-negative group, does not qualify as a seed on its own.
+
+Two subsets need 2 seeds. That's it -- the question has now shifted from "how do we assign step by step" to "how many seeds can I actually assemble from what I have", a pure counting problem.
+
+So how many can we assemble? Count separately:
+
+- Mixed groups: each one is a seed by itself, contributing `num_mixed` seeds.
+- Pairs: `num_pos_only` pure-positive groups and `num_neg_only` pure-negative groups can be paired up one-to-one, until whichever pile is smaller runs out -- yielding `min(num_pos_only, num_neg_only)` pairs.
+  (Incidentally, if the question were "how many ways can they be paired", the answer is `num_pos_only * num_neg_only` -- a Cartesian product, with no division by 2 needed, since the two elements come from different sets and there is no double-counting to begin with. That is a different thing from "choose 2 from the same pile", `C(n,2) = n(n-1)/2` -- I got this wrong once.)
+
+So the feasibility criterion collapses into a single line:
+
+```
+num_mixed + min(num_pos_only, num_neg_only) >= 2
+```
+
+Assemble at least 2 seeds and you can proceed; fall short and it's a dead end. That's the whole story.
+
+I really like this formula, because it swallows, in one shot, all the "degenerate cases" that I used to discuss separately. I originally split things into three degenerate cases based on "is there a mixed group, is there a pure-positive/pure-negative group", with a separate check for each. Now they are all just different values of this one expression:
+
+```{r}
+feasible <- function(n_mixed, n_pos_only, n_neg_only) n_mixed + min(n_pos_only, n_neg_only) >= 2L
+
+stopifnot( feasible(2,0,0),  feasible(1,1,1),  feasible(0,2,2), feasible(0,5,2))
+stopifnot(!feasible(1,0,0), !feasible(0,3,1), !feasible(0,0,0), !feasible(1,2,0))
+cat("PASS\n")
+```
+
+We can see above that a single inequality covers every case, no cascading `if`s required. And there is no recursion either -- I originally imagined this as a process of "two managers gradually clearing their alarms", written as a layered recursive function. Once you recognize it is really a one-shot act of "pick 2 seeds", the recursion turns out to be unnecessary.
+
+We can also brute-force verify the criterion by literal enumeration, for small `n_total`:
+
+```{r}
+feasible_bruteforce <- function(n_mixed, n_pos_only, n_neg_only) {
+  n_total <- n_mixed + n_pos_only + n_neg_only
+  if (n_total == 0L) return(FALSE)
+
+  is_pos_source <- c(rep(TRUE,  n_mixed), rep(TRUE,  n_pos_only), rep(FALSE, n_neg_only))
+  is_neg_source <- c(rep(TRUE,  n_mixed), rep(FALSE, n_pos_only), rep(TRUE,  n_neg_only))
+
+  for (m in 0:(2^n_total - 1)) {
+    to_imb <- as.logical(bitwAnd(m, 2^(seq_len(n_total) - 1)))
+    imb_ok <- any(is_pos_source[ to_imb]) && any(is_neg_source[ to_imb])
+    bal_ok <- any(is_pos_source[!to_imb]) && any(is_neg_source[!to_imb])
+    if (imb_ok && bal_ok) return(TRUE)
+  }
+  FALSE
+}
+
+grid <- CJ(n_mixed = 0:3, n_pos_only = 0:3, n_neg_only = 0:3)
+grid[, closed_form := mapply(feasible, n_mixed, n_pos_only, n_neg_only)]
+grid[, brute_force  := mapply(feasible_bruteforce, n_mixed, n_pos_only, n_neg_only)]
+stopifnot(identical(grid$closed_form, grid$brute_force))
+cat("PASS: closed form matches brute force on all", nrow(grid), "combinations\n")
+```
+
+We can see above that the closed-form criterion agrees with brute-force enumeration on every combination tried.
+
+Here is a table of the different scenarios, and where their seeds come from:
+
+| Scenario | `num_mixed` | pairable | criterion | seeds come from |
+|---|---|---|---|---|
+| all three present, mixed is enough | `>=2` | any | pass | 2 mixed |
+| all three present, only one mixed | 1 | `>=1` | pass | 1 mixed + 1 pair |
+| no mixed at all (old degenerate case 1) | 0 | `>=2` | pass | 2 pairs |
+| mixed only (old degenerate case 2) | `>=2` | 0 | pass | 2 mixed |
+| mixed + pure-positive only (old degenerate case 3) | `>=2` | 0 | pass | 2 mixed |
+| only one mixed, and no pair available | 1 | 0 | fail | -- |
+| no mixed, only one pair available | 0 | `<=1` | fail | -- |
+
+One formula, all seven scenarios covered, no branching `if`s needed. And no recursion -- I originally thought of it as a step-by-step process of "two managers gradually clearing their alarms", which I wrote as a nested recursive function; once you recognize it is really a one-shot act of "pick 2 seeds", the whole recursion becomes unnecessary.
+
+### 3.3 The real Laribi2024 dataset
+
+The above was all on paper. Now let's pull out the real data and see what it actually looks like. First confirm the most basic shape.
+
+Note: the Laribi2024 dataset is not included in this blog's repository, so the code chunks in this section are shown but not executed here; the outputs below were produced by running the same code against the dataset in a separate environment.
+
+```{r}
+#| eval: false
+library(data.table)
+DL <- "/Users/caowei/code/r/mlr3torchAUM/benchmark/data"
+X <- fread(file.path(DL, "Laribi2024full.csv"), select = c("visit_id", "patient_id", "oym"))
+
+nrow(X)                  # 248485
+uniqueN(X$visit_id)      # 248485
+uniqueN(X$patient_id)    # 123646
+class(X$oym)             # "logical"
+anyNA(X$oym)             # FALSE
+```
+
+```
+> nrow(X)
+[1] 248485
+> uniqueN(X$visit_id)
+[1] 248485
+> uniqueN(X$patient_id)
+[1] 123646
+> class(X$oym)
+[1] "logical"
+> anyNA(X$oym)
+[1] FALSE
+```
+
+248,485 rows and 248,485 distinct `visit_id`s -- the two numbers matching confirms every row really is one visit, with no duplicate rows. These 248 thousand visits belong to 123,646 patients, an average of about two visits per patient. `oym` is logical with no `NA`, and that has to be checked first: later we rely on `sum(oym)` to count positive samples, and a single `NA` sneaking into the whole column would silently turn everything into `NA` without raising an error.
+
+Label distribution at the visit level:
+
+```{r}
+#| eval: false
+X[, .N, keyby = oym]
+X[, mean(oym)]
+```
+
+```
+> X[, .N, keyby = oym]
+     oym      N
+1: FALSE 211780
+2:  TRUE  36705
+> X[, mean(oym)]
+[1] 0.1477
+```
+
+14.77%. (Note this is the proportion at the *visit* level, not "14.77% of patients die within a year" -- the two are different granularities and must not be conflated.)
+
+Now look at how many visits each patient has:
+
+```{r}
+#| eval: false
+vpp <- X[, .N, by = patient_id]
+vpp[, .N, keyby = .(n_visits = pmin(N, 5L))]
+vpp[, max(N)]
+```
+
+```
+> vpp[, .N, keyby = .(n_visits = pmin(N, 5L))]
+   n_visits     N
+1:        1 70767
+2:        2 25967
+3:        3 11517
+4:        4  5830
+5:        5  9565
+> vpp[, max(N)]
+[1] 30
+```
+
+(The last row's "5" is really "5 or more" -- `pmin` collapses everything above 5 down to 5.)
+
+More than half the patients (70,767 / 123,646 = 57%) have only one visit. This group can never be "mixed" -- a single visit has only one label, either all-positive or all-negative. The most frequent patient had 30 visits.
+
+Now let's label each patient using the three-way classification from Section 3.2. This step does two things: it aggregates "one row per visit" into "one row per patient", computes each patient's positive/negative counts, and applies one of the three labels based on the relationship between `n_pos` and `n`:
+
+```{r}
+#| eval: false
+classify_groups <- function(dt, group_col, label_col) {
+  ## keep j to bare .N / sum() so data.table's GForce optimization kicks in;
+  ## derived columns (n_neg, type) go in a second bracket, or the whole j falls back to the slow path
+  g <- dt[, .(n = .N, n_pos = sum(get(label_col))), keyby = c(group_col)]
+  g[, `:=`(n_neg = n - n_pos,
+           type  = fifelse(n_pos > 0L & n_pos < n, "mixed",
+                   fifelse(n_pos > 0L, "pos_only", "neg_only")))][]
+}
+
+gt <- classify_groups(X, "patient_id", "oym")
+gt[, .N, keyby = type]
+
+gt[, .(n_patients = .N, n_pos = sum(n_pos), n_neg = sum(n_neg)), keyby = type]
+```
+
+```
+> gt[, .N, keyby = type]
+       type      N
+1:    mixed   9002
+2: neg_only 104765
+3: pos_only   9879
+
+> gt[, .(n_patients = .N, n_pos = sum(n_pos), n_neg = sum(n_neg)), keyby = type]
+       type n_patients n_pos  n_neg
+1:    mixed       9002 19613  25601
+2: neg_only     104765     0 186179
+3: pos_only       9879 17092      0
+```
+
+The second table is, to me, the most interesting fact about this dataset: mixed patients number only 9,002 -- 7.3% of all patients, the smallest of the three groups -- yet on their own they contribute 19,613 positive samples, 53.4% of all 36,705 positives, more than half. In other words, the mixed group is simultaneously the scarcest resource and the biggest single contributor of positive samples. That also matches intuition: a patient who visits many times, with the label differing across visits, is by construction one of the "high visit count" patients, so naturally has a larger sample count.
+
+Finally, let's apply the 3.2 criterion to check whether this dataset is even workable:
+
+```
+num_mixed + min(num_pos_only, num_neg_only)
+  = 9002 + min(9879, 104765)
+  = 9002 + 9879
+  = 18881   >= 2
+```
+
+It passes easily, with an absurd amount of slack: a single mixed group is already a seed, so 9,002 mixed groups means 9,002 seeds, and we only need 2.
+
+So for Laribi2024, none of the degenerate cases in the Section 3.2 table are ever hit, and the "dead end" rows are nowhere close. Is it still worth coding the degenerate cases into the algorithm, then? I think so, for two reasons: first, this code will not serve only this one dataset -- grouping by hospital instead, or first drawing a small subsample before splitting, would immediately change the three-way distribution; second, the strategy of "prefer mixed groups as seeds" costs almost nothing on this dataset -- taking 2 out of 9,002 leaves the other 9,000 to freely participate in the later random assignment, no loss at all. But if one day the mixed group only has two or three members, this strategy needs to be reconsidered, and that's when the Section 3.2 table becomes the thing to reason from.
+
+### 3.4 The algorithm
+
+With all of the above understood, the algorithm reduces to three steps.
+
+**Step 1.** Split all groups by label composition into three kinds: mixed groups, pure-positive groups, pure-negative groups.
+
+**Step 2.** Assemble the seeds. First check with the criterion above whether 2 seeds can be assembled; if not, error out. If they can, pick them: prefer mixed groups as seeds (one mixed group stands in for one pair, using fewer groups and leaving more freely-assignable groups for step 3); when fewer than 2 mixed groups are available, make up the shortfall with (pure-positive, pure-negative) pairs. Before picking, shuffle each of the three piles once, then take the first few after shuffling -- so who gets picked is entirely random.
+
+**Step 3.** Distribute the two seeds and the remaining groups: the two seeds are randomly assigned, one to "balanced" and one to "imbalanced"; every remaining group independently flips its own coin to decide which side it lands on.
+
+There is one place I originally got wrong, worth recording: the two random draws in step 3 are two independent things, and both are necessary. The "shuffle" in step 2 randomizes *which specific groups within a class get picked*. The random draw at the start of step 3 randomizes *which subset each of the two picked seeds goes to*. If we got lazy and thought "well, step 2 already shuffled things", and simply always assigned the first seed to "imbalanced", then in the "1 mixed + 1 pair" scenario the mixed group would land in "imbalanced" 100% of the time, and the pair-seed would land in "balanced" 100% of the time -- because "mixed comes before pairs" is an artifact of the code's writing order, and has nothing to do with any random number. I actually ran this 2,000 times and got exactly 100%, not once different. This isn't "slightly biased" -- it's a structural bias that no number of different random seeds can fix.
+
+### 3.5 Function pipeline
+
+The whole pipeline looks like this; the "granularity" of the intermediate data changes three times:
+
+```
+Raw table: one row per [visit]  (Laribi2024: 248,485 rows)
+    |
+    |  classify_groups(dt, group_col, label_col)
+    |  aggregate by group, compute each group's pos/neg counts, tag mixed / pos_only / neg_only
+    v
+One row per [patient], with a type label  (123,646 rows)
+    |
+    |  split(gt$patient_id, gt$type)
+    v
+Three [patient id] vectors: mixed / pos_only / neg_only
+    |
+    |  distribute_groups(mixed_ids, pos_only_ids, neg_only_ids)
+    |    internally calls make_seeds() to assemble two seeds, then coin-flips the rest
+    v
+Two [patient id] vectors: imb_group_ids / bal_group_ids
+    |
+    |  pool_sizes(gt, assign)
+    |  look back up how many positive/negative [records] each batch of patients contributes
+    v
+Four numbers: imb_pool_pos / imb_pool_neg / bal_pool_pos / bal_pool_neg
+    |
+    |  compute_target_counts_v2(p_neg, Tpos, Tneg, with_group = TRUE, four pools)
+    v
+How many positive and negative samples to draw at each imbalance ratio
+```
+
+Note that the four numbers finally handed to `compute_target_counts_v2` are *record* counts, not *patient* counts -- the granularity drops back down from "patient" to "record" again at the `pool_sizes` step. This pipeline changes granularity three times along the way, which I think is the single easiest place to get confused, so I've drawn it out explicitly.
+
+### 3.6 Two core functions
+
+First, three small general-purpose helpers. They're all short, but each one is guarding against an R gotcha:
+
+```{r}
+## The official safe way to write ?sample.
+## Gotcha: when length(x) == 1 and x is a numeric value >= 1, sample(x) silently
+## switches to sampling from 1:x. Our group ids happen to be integers, and hitting
+## a single-group case would trip this silently, with no error.
+resample <- function(x, ...) x[sample.int(length(x), ...)]
+
+## Take / drop the first n elements.
+## Gotcha: when n = 0, x[-seq_len(0)] is empty, not "remove nothing"; 1:0 counts
+## backwards to c(1, 0). So n <= 0 must be special-cased, and sequences always use
+## seq_len, never 1:n.
+take_first <- function(x, n) if (n <= 0L) x[0] else x[seq_len(min(n, length(x)))]
+drop_first <- function(x, n) if (n <= 0L) x    else x[-seq_len(min(n, length(x)))]
+
+x <- letters[1:5]
+stopifnot(identical(take_first(x, 0L), character(0)),
+          identical(take_first(x, 2L), c("a","b")),
+          identical(take_first(x, 10L), x))
+
+stopifnot(identical(drop_first(x, 0L), x),
+          identical(drop_first(x, 1L), c("b","c","d","e")),
+          identical(drop_first(x, 10L), character(0)))
+
+set.seed(1); stopifnot(length(resample(7L)) == 1L)   # does not trigger the magic-scalar behavior
+stopifnot(length(resample(integer(0))) == 0L)
+stopifnot(inherits(tryCatch(resample(integer(0), 1), error = function(e) e), "error"))
+cat("PASS\n")
+```
+
+`make_seeds` handles step 2: assemble 2 seeds, and hand back whichever groups were not picked.
+
+(Why hand back the leftovers too? Because it already shuffled all three piles internally. If the caller shuffled again on their own, that would be a brand-new, independent shuffle unrelated to who was already picked -- the "leftovers" computed that way would be wrong, with seeds duplicated or groups that should remain vanishing. I've been bitten by this.)
+
+```{r}
+make_seeds <- function(mixed, pos_only, neg_only){
+    if(!feasible(length(mixed), length(pos_only), length(neg_only))) stop("impossible to make two seeds!")
+    mixed <- resample(mixed); pos_only <- resample(pos_only); neg_only <- resample(neg_only)
+    take_mixed_num <- min(2L, length(mixed))   # prefer mixed, at most 2
+    take_pair_num <- 2L - take_mixed_num       # make up any shortfall with pairs
+    seeds <- c(as.list(take_first(mixed, take_mixed_num)),
+      unname(Map(c, take_first(pos_only, take_pair_num), take_first(neg_only, take_pair_num))))
+    list(seeds = seeds,
+         rest=list(mixed=drop_first(mixed, take_mixed_num),
+                   pos_only=drop_first(pos_only, take_pair_num),
+                   neg_only=drop_first(neg_only, take_pair_num)))
+}
+
+set.seed(1)
+r <- make_seeds(c("m1","m2","m3"), c("p1"), c("n1"))
+stopifnot(is.list(r), setequal(names(r), c("seeds","rest")))
+stopifnot(length(r$seeds) == 2L)
+stopifnot(setequal(names(r$rest), c("mixed","pos_only","neg_only")))
+## picked + leftover must equal the original input, exactly
+all_used <- c(unlist(r$seeds), unlist(r$rest))
+stopifnot(setequal(all_used, c("m1","m2","m3","p1","n1")))
+stopifnot(length(all_used) == 5L)
+cat("PASS\n")
+```
+
+The line `take_mixed_num <- min(2L, length(mixed))` took me two rewrites to get right. The first version had three separate `if` branches for "2+ mixed groups / exactly 1 / none at all" -- but all three cases want the very same number, which `min` computes in one line, with no need to branch at all. Whenever you see several `if` branches layered by count, it's worth asking whether the boundaries between them collapse into a single `min`/`max`.
+
+`as.list` and `Map(c, ...)` each do their own job: `as.list` splits the picked mixed groups into separate individual seeds; `Map(c, pos, neg)` pairs up positive and negative groups position-by-position into length-2 vectors, one pair = one seed. The outer `c()` concatenates the two batches of seeds into a single list -- note that `c()` switches to "list-concatenation" mode as soon as any argument is a list, so it will not flatten the vectors inside.
+
+`distribute_groups` handles step 3, and is the exit point of the whole pipeline:
+
+```{r}
+distribute_groups <- function(mixed_ids, pos_only_ids, neg_only_ids) {
+    res <- make_seeds(mixed_ids, pos_only_ids, neg_only_ids)
+    group_ids <- list(integer(0), integer(0))   # [[1]] imbalanced, [[2]] balanced
+
+    # the two seeds randomly decide who goes where: draw 1 -> seed 1 goes to imbalanced, else the reverse
+    sampled_idx_seed <- sample.int(2, 1)
+    group_ids <- lapply(1:2, function(x) c(group_ids[[x]], res$seeds[[if (x == 1) sampled_idx_seed else 3 - sampled_idx_seed]]))
+
+    # the remaining groups each independently flip a coin
+    res_all <- c(res$rest$mixed, res$rest$pos_only, res$rest$neg_only)
+    sampled_idx <- sample.int(2, length(res_all), replace = TRUE)
+    group_ids <- lapply(1:2, function(x) c(group_ids[[x]], res_all[which(sampled_idx == x)]))
+
+    list(imb_group_ids=group_ids[[1]], bal_group_ids=group_ids[[2]])
+}
+
+## a self-contained smoke test with toy ids
+set.seed(42)
+a <- distribute_groups(c("m1","m2","m3"), c("p1","p2"), c("n1","n2"))
+str(a)
+stopifnot(setequal(c(a$imb_group_ids, a$bal_group_ids), c("m1","m2","m3","p1","p2","n1","n2")))
+cat("PASS\n")
+```
+
+Two small points:
+
+`3 - sampled_idx_seed` fetches the index of "the other" seed: a draw of 1 gives 2, a draw of 2 gives 1 -- shorter than an `if`/`else`.
+
+For the remaining groups, my first instinct was a binary bitmask: draw a random integer from `0` to `2^N - 1` and let each bit decide a group's side -- elegant. But the real data has over 120 thousand patients, and `2^123644` overflows straight to `Inf`, so the mask can't even be constructed. `sample.int(2, N, replace = TRUE)` -- coin-flipping one at a time -- has no such problem; flipping 120 thousand coins takes 0.0036 seconds. The same trick that worked well for exhaustively enumerating the 16 assignments in the toy example completely fails at production scale -- before reusing it, always ask how large `N` is this time.
+
+A `pool_sizes` helper reads back how many positive/negative *records* a batch of patients contributes, once groups have been assigned to subsets:
+
+```{r}
+pool_sizes <- function(gt, assign, group_col = "patient_id") {
+  gt <- copy(gt)   # := has reference semantics -- without copy(), we'd permanently
+                    # write a `subset` column into the caller's gt
+  gt[, subset := fifelse(get(group_col) %in% assign$imb_group_ids, "imb",
+                 fifelse(get(group_col) %in% assign$bal_group_ids, "bal", "none"))][
+    , .(pool_pos = sum(n_pos), pool_neg = sum(n_neg)), by = subset]
+}
+
+gt_toy <- data.table(patient_id = c("a","b","c","d"),
+                     n = c(3,2,5,1), n_pos = c(1,0,5,1), n_neg = c(2,2,0,0))
+assign_toy <- list(imb_group_ids = c("a","c"), bal_group_ids = c("b","d"))
+
+r <- pool_sizes(gt_toy, assign_toy)
+print(r)
+stopifnot(
+  r[subset=="imb", pool_pos] == 6,   # a(1) + c(5)
+  r[subset=="imb", pool_neg] == 2,   # a(2) + c(0)
+  r[subset=="bal", pool_pos] == 1,   # b(0) + d(1)
+  r[subset=="bal", pool_neg] == 2    # b(2) + d(0)
+)
+cat("PASS\n")
+```
+
+### 3.7 Validation
+
+Let's run this against the real data: 123,646 patients from Laribi2024, `p_neg = 0.99` fixed (i.e. positives are only 1% of the imbalanced subset), and `distribute_groups` run once per random seed for 1,000 different seeds, tracking how large an `n_subset` each draw achieves.
+
+This uses `classify_groups` from 3.3, `distribute_groups` from 3.6, and `compute_target_counts_v2` from Section 2; `pool_sizes` has only appeared in the pipeline diagram so far, and is included here in full. On a single machine this takes about 110 seconds. Since it needs the Laribi2024 dataset, this chunk is not executed in this repository -- the output below is from running the same code separately.
+
+```{r}
+#| eval: false
+suppressMessages(library(data.table))
+
+DL <- "/Users/caowei/code/r/mlr3torchAUM/benchmark/data"
+X   <- fread(file.path(DL, "Laribi2024full.csv"), select = c("visit_id","patient_id","oym"))
+gt  <- classify_groups(X, "patient_id", "oym")
+ids <- split(gt$patient_id, gt$type)
+Tpos <- X[, sum(oym)]; Tneg <- X[, sum(!oym)]
+
+N_TRIAL <- 1000L
+P_NEG   <- 0.99
+
+res <- rbindlist(lapply(seq_len(N_TRIAL), function(s) {
+  set.seed(s)
+  a  <- distribute_groups(ids$mixed, ids$pos_only, ids$neg_only)
+  p  <- pool_sizes(gt, a)
+  ip <- p[subset == "imb", pool_pos]; iN <- p[subset == "imb", pool_neg]
+  bp <- p[subset == "bal", pool_pos]; bn <- p[subset == "bal", pool_neg]
+  ## the upper bound implied by each of the four constraints; whichever is smallest is the binding one
+  bounds <- c(imb_pool_pos = ip/(1-P_NEG), imb_pool_neg = iN/P_NEG,
+              bal_pool_pos = bp/0.5,        bal_pool_neg = bn/0.5)
+  ctc <- compute_target_counts_v2(P_NEG, Tpos, Tneg, TRUE, ip, iN, bp, bn)
+  data.table(seed = s, imb_pool_pos = ip, imb_pool_neg = iN,
+             bal_pool_pos = bp, bal_pool_neg = bn,
+             n_subset = ctc$n_imb,                    # n_imb is n_subset
+             binding_constraint = names(which.min(bounds)))
+}))
+
+res[, .(min = min(n_subset), max = max(n_subset),
+        mean = round(mean(n_subset), 1), range = max(n_subset) - min(n_subset))]
+res[, .N, keyby = binding_constraint]
+```
+
+```
+> res[, .(min = min(n_subset), max = max(n_subset),
++         mean = round(mean(n_subset), 1), range = max(n_subset) - min(n_subset))]
+     min   max    mean range
+1: 35676 37618 36703.2  1942
+
+> res[, .N, keyby = binding_constraint]
+   binding_constraint    N
+1:       bal_pool_pos 1000
+```
+
+The `n_subset` distribution across 1,000 random seeds: jitter of under 2,000, only about 5% relative to a scale of thirty-six thousand.
+
+The second table is more telling: in all 1,000 runs, the constraint that binds `n_subset` is always the same one -- the other three are never once the bottleneck.
+
+```
+binding_constraint    N
+bal_pool_pos       1000
+```
+
+The reason is structural: the balanced subset needs a 50/50 split, and positive samples are the globally scarce resource. In Laribi2024, positives are only 14.77% globally (36,705 / 248,485), negatives 85.23%. At `p_neg = 0.99`, the imbalanced subset needs only 1% positives, so it barely touches this scarce resource; the balanced subset needs 50%, and half of that quota has to come entirely out of those 36,705 positives -- so the bottleneck naturally lands there.
+
+### 3.8 Further thoughts: maximizing `n_subset`
+
+Section 3.7 concludes `n_subset = 2 * bal_pool_pos`, and a random half-split only gives 36,705. Can this number be pushed higher?
+
+Set the group constraint aside for a moment -- pretend positive and negative samples can be freely assigned to either subset -- and see where the theoretical ceiling is. Let:
+
+```
+A = imb_pool_pos,  C = Tpos - A     (Tpos = 36,705)
+B = imb_pool_neg,  D = Tneg - B     (Tneg = 211,780)
+```
+
+Plugging in `p = 0.99`, the four upper bounds become one-variable functions of `A` and `B` respectively:
+
+```
+n_subset = min( A/0.01,  B/0.99,  73410 - 2A,  423560 - 2B )
+```
+
+where `A` ranges over `[0, 36705]` and `B` over `[0, 211780]`, independently of each other. There is a key assumption buried here: `A` and `B` cannot actually take on arbitrary integers, because patients move as whole groups -- `A` can only be a sum of some subset of patients' `n_pos` values. We'll pick that constraint back up later; for now, let's see how far we can go without it.
+
+Actually, there's a further hidden assumption: are `A` and `B` really independent? Because patients move as whole groups, if `A` (`imb_pool_pos`) includes some mixed patient, that patient's negative samples cannot then go into `B` (`imb_pool_neg`). That would further complicate the analysis. Regardless, let's look at the simple case first.
+
+```{r}
+## 3.8 setup: temporarily ignore group constraints; plot the four upper bounds
+## on one figure to see where the bottleneck is.
+## A = imb_pool_pos in [0, Tpos];  C = Tpos - A
+## B = imb_pool_neg in [0, Tneg];  D = Tneg - B
+## n_subset = min( A/(1-p),  B/p,  2*(Tpos-A),  2*(Tneg-B) )
+## Only the two "min" curves are coloured; the four raw bounds are drawn faint.
+## Pure analytic demo -- no dependency on any earlier data or function, can run alone.
+
+Tpos <- 36705; Tneg <- 211780; P <- 0.99
+FAINT <- adjustcolor("grey30", alpha.f = 0.28)
+RED <- "#E45756"; BLUE <- "#4C78A8"
+
+A <- seq(0, Tpos, length.out = 3000)
+B <- seq(0, Tneg, length.out = 3000)
+
+Astar <- 2 * Tpos * (1 - P) / (3 - 2 * P);  peakA <- Astar / (1 - P)
+Bstar <- 2 * Tneg * P / (1 + 2 * P);        peakB <- Bstar / P
+
+par(mar = c(5, 6.5, 4, 2))
+plot(NA, xlim = c(0, Tneg), ylim = c(0, 2 * Tneg),
+     xlab = "A = imb_pool_pos   or   B = imb_pool_neg",
+     ylab = "upper bound on n_subset",
+     main = "Four upper bounds on n_subset, raw scale (p = 0.99)")
+
+## the four raw bounds, faint
+lines(A, A / (1 - P),    col = FAINT, lwd = 1.5)
+lines(A, 2 * (Tpos - A), col = FAINT, lwd = 1.5)
+lines(B, B / P,          col = FAINT, lwd = 1.5)
+lines(B, 2 * (Tneg - B), col = FAINT, lwd = 1.5)
+
+## the two min curves, coloured
+lines(A, pmin(A / (1 - P), 2 * (Tpos - A)), col = RED,  lwd = 3.5)
+lines(B, pmin(B / P,       2 * (Tneg - B)), col = BLUE, lwd = 3.5)
+
+## intersections
+points(Astar, peakA, pch = 19, cex = 1.2)
+text(Astar, peakA, sprintf("  A* = %.1f,  peak = %s", Astar, format(round(peakA), big.mark = ",")),
+     adj = c(0, -0.7), cex = 0.95)
+points(Bstar, peakB, pch = 19, cex = 1.2)
+text(Bstar, peakB, sprintf("  B* = %s,  peak = %s",
+     format(round(Bstar), big.mark = ","), format(round(peakB), big.mark = ",")),
+     adj = c(0, -0.7), cex = 0.95)
+
+## label the faint lines
+text(2 * Tneg * (1 - P), 2 * Tneg, "A/(1-p)",  col = "grey35", cex = 0.85, adj = c(-0.15, 1.4))
+text(Tpos, 0,            "2*(Tpos-A)",         col = "grey35", cex = 0.85, adj = c(-0.05, -0.5))
+text(Tneg, Tneg / P,     "B/p",                col = "grey35", cex = 0.85, adj = c(1.1, -0.5))
+text(60000, 2 * (Tneg - 60000), "2*(Tneg-B)",  col = "grey35", cex = 0.85, adj = c(0.5, -0.6))
+
+legend("top", horiz = TRUE, lwd = c(1.5, 3.5, 3.5), col = c(FAINT, RED, BLUE),
+       bg = "white", box.col = NA, inset = 0.02,
+       legend = c("the four raw bounds",
+                  "min( A/(1-p), 2*(Tpos-A) )",
+                  "min( B/p, 2*(Tneg-B) )"))
+```
+
+We can see above three things at a glance: first, the blue curve's peak is 142,134, the red curve's peak only 71,971; even at the random-half-split point, blue is 106,960 and red is 36,705 -- the negative-sample pair never once drives the decision, which is the same fact as Section 3.7's empirical finding (all 1,000 runs bottlenecked on `bal_pool_pos`), stated two different ways.
+
+Second, the red curve's peak sits at `A* = 719.7`. The left branch `A/(1-p)` has slope +100, the right branch `2*(Tpos-A)` has slope only -2 -- a 50x difference -- so the peak is pinned far to the left, at just 2% of the full range.
+
+Third, where we actually stand (`A = 18,352`, the random half-split) gives `n_subset = 36,705`. In other words, we are already 96% of the way down the descending slope, and only capture half of the peak value.
+
+Both the peak value and peak location have closed forms. Solving `A/(1-p) = 2*(Tpos-A)` gives:
+
+```
+A* = 2*Tpos*(1-p) / (3-2p) = 719.7
+peak = A*/(1-p) = 2*Tpos / (3-2p) = 71,970.6
+```
+
+There's a satisfying coincidence here: `2*Tpos/(3-2p)` is exactly the `Tpos/(1.5-p)` bound from Section 1. Likewise the blue curve's peak `2*Tneg/(1+2p)` is exactly Section 1's `Tneg/(p+0.5)`. The two match to the decimal:
+
+```
+red peak  = 2*Tpos/(3-2p) = 71,970.59    Section 1's Tpos/(1.5-p) = 71,970.59
+blue peak = 2*Tneg/(1+2p) = 142,134.2    Section 1's Tneg/(p+0.5) = 142,134.2
+```
+
+This isn't a coincidence -- looking back, it makes complete sense: Section 1's derivation of those two bounds never involved groups at all, and positive/negative samples could be split however we liked -- that is exactly the situation where "A can be chosen freely".
+
+The intuition is direct: at `p = 0.99`, the imbalanced subset only needs 1% positives, so it can only make use of 719.7 of them at most; a random half-split, however, hands it 18,352 -- more than 17,000 excess positives just sitting unused in the imbalanced subset, while the balanced subset gets starved for exactly this batch. The scarce resource gets handed to the side that doesn't need it.
+
+Now bring the group constraint back: is the target `A ≈ 720` even reachable under "patients move as whole groups"?
+
+Yes, and quite comfortably. This is a subset-sum problem, but this dataset leaves a lot of slack:
+
+```
+patients with n_pos == 0 (neg_only)   104,765     can go to either side without moving A
+patients with n_pos == 1               10,053
+patients with n_pos == 2                4,484
+```
+
+The `n_pos == 1` patients alone number 10,053 -- pick 720 of them for the imbalanced subset, and `A` lands exactly on 720. Pick the 720 with the smallest `n_neg`, and they carry away essentially 0 negative samples between them, so `B` doesn't even need to move. `B` then needs to land in `[71,251, 175,794]` -- and the neg_only patients alone hold 186,179 negative samples, so any reasonable pick can steer `B` into range. The two degrees of freedom barely interact.
+
+So in theory, `n_subset` could go from 36,705 up to 71,971 -- roughly double.
+
+Before touching the algorithm, though, one thing needs thinking through: the two subsets built this way would have very different patient compositions -- the imbalanced subset would be almost entirely patients who never died, plus around 700 who died exactly once, while the balanced subset would include every patient who was positive multiple times, i.e. the more severe cases. `n_subset` gets bigger, but can the two subsets still be called "two halves of the same distribution"? If not, and we use them as each other's train/test set, is the resulting performance gap really about the model, or about the difference in population?
+
+That question matters more than "how do we maximize `n_subset`".
+
+So: how do we get both randomness and a maximized `n_subset` at the same time? That's an important open question, and the one we need to tackle next.
+
+## Conclusions
+
+- `compute_target_counts` reduces the imbalanced/balanced split problem to a single free variable, `n_subset`, bounded by two inequalities derived from "no sample used twice" and "the two subsets are the same size".
+- Requiring same-group records (e.g. all of one patient's visits) to stay together in one subset turns those two bounds into four pool-based bounds, which `compute_target_counts_v2(..., with_group = TRUE)` consumes directly.
+- Whether a group assignment is even feasible collapses into one inequality: `num_mixed + min(num_pos_only, num_neg_only) >= 2`, which subsumes every degenerate case we used to special-case.
+- On the real Laribi2024 dataset (123,646 patients, 248,485 visits, 14.77% positive at the visit level), feasibility is not a concern at all -- 9,002 mixed patients alone supply far more than the 2 seeds required.
+- Across 1,000 random seeds, the achievable `n_subset` is stable (35,676-37,618) and always bottlenecked on the same constraint, `bal_pool_pos`, because positive samples are globally scarce and the balanced subset needs half of them.
+- Ignoring the group constraint, the theoretical ceiling on `n_subset` is roughly double the random-half-split value (71,971 vs. 36,705) -- but reaching it would change the two subsets' patient composition substantially, raising the question of whether they remain comparable populations. Reconciling that with randomness is left as future work.
+
+## Session info
+
+```{r}
+sessionInfo()
+```
